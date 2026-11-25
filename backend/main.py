@@ -71,8 +71,15 @@ app.mount("/pdfs", StaticFiles(directory=str(PDF_DIR)), name="pdfs")
 
 
 def get_conn() -> psycopg.Connection:
-    """Open a synchronous psycopg3 connection to Neon/Postgres."""
-    return psycopg.connect(DATABASE_URL)
+    """Open a psycopg3 connection to Neon/Postgres without idle-in-transaction locks."""
+    return psycopg.connect(
+        DATABASE_URL,
+        autocommit=True,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
 
 
 def _l2_norm(vec: list[float]) -> list[float]:
@@ -89,8 +96,19 @@ def make_llm_json(model: str):
     with automatic exponential backoff + jitter on free-tier 429 rate limits.
     """
 
+    def _strip_additional_props(obj):
+        if isinstance(obj, dict):
+            obj.pop("additionalProperties", None)
+            for v in obj.values():
+                _strip_additional_props(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _strip_additional_props(item)
+        return obj
+
     async def _llm_json(system: str, user: str, schema: type[BaseModel]) -> dict:
-        for attempt in range(5):
+        clean_schema = _strip_additional_props(schema.model_json_schema())
+        for attempt in range(8):
             try:
                 resp = await client.aio.models.generate_content(
                     model=model,
@@ -98,7 +116,7 @@ def make_llm_json(model: str):
                     config=types.GenerateContentConfig(
                         system_instruction=system,
                         response_mime_type="application/json",
-                        response_schema=schema,
+                        response_schema=clean_schema,
                         temperature=0.0,
                     ),
                 )
@@ -106,8 +124,8 @@ def make_llm_json(model: str):
             except Exception as e:
                 err = str(e)
                 is_transient = "429" in err or "RESOURCE_EXHAUSTED" in err or "503" in err
-                if is_transient and attempt < 4:
-                    wait = (10 * (2**attempt)) + random.uniform(0.5, 2.5)
+                if is_transient and attempt < 7:
+                    wait = min(90.0, (12 * (1.6**attempt))) + random.uniform(1.0, 4.0)
                     await asyncio.sleep(wait)
                     continue
                 raise

@@ -1,5 +1,5 @@
 name: oncology-causal-ml-slr
-version: 1
+version: 2
 criteria:
   # --- 1. Study Design & Context ---
   - criterion_id: STUDY_DESIGN
@@ -7,7 +7,10 @@ criteria:
     question: "Study Design for training data (RCT / observational)"
     data_type: enum
     enum_values: ["1", "2"]
-    scoring_rules: "1 = Obs (observational cohort, EHR, registry, real-world data); 2 = RCT (randomized controlled trial data)"
+    scoring_rules: >
+      1 = Obs (observational cohort, EHR, registry, real-world data);
+      2 = RCT (randomized controlled trial data).
+      Calibration note: Classify based on the primary data source used to train/estimate effects, not secondary post-hoc validation alone.
     section_hints: ["Methods", "Study Design", "Data Source", "Cohort"]
 
   - criterion_id: PATIENT_POPULATION
@@ -18,8 +21,9 @@ criteria:
     scoring_rules: >
       1 = Vague (e.g., 'breast cancer patients');
       2 = Some inclusion criteria OR dataset mentioned (e.g., SEER cohort);
-      3 = Clear IC/EC, dataset, timeframe, key eligibility;
-      4 = Full IC/EC + RCT eligibility, matching, ITT/as-treated, treatment switch over
+      3 = Clear IC/EC, dataset, timeframe, key eligibility (including meta/multi-study cohorts with explicit cohort/source references);
+      4 = Full IC/EC + RCT eligibility, matching, ITT/as-treated, treatment switch over.
+      Calibration note: Do not penalize to 2 when inclusion/exclusion criteria, cohort definitions, or cross-referenced multi-study/registry populations are substantively specified.
     section_hints: ["Methods", "Patients", "Eligibility", "Study Population"]
 
   - criterion_id: COMPARATORS
@@ -30,8 +34,9 @@ criteria:
     scoring_rules: >
       1 = Not clear / ambiguous;
       2 = Treatments named only;
-      3 = Defined but missing details (dose/timing);
-      4 = Fully specified (protocol-level clarity, replicable clinically)
+      3 = Defined but missing details (dose/timing, or biomarker/subgroup arm definitions);
+      4 = Fully specified (protocol-level clarity, replicable clinically).
+      Calibration note: Score 3 when treatment arms and comparators (including biomarker-stratified or clinical comparators) are clearly defined even if exact dosing/schedules are partial; reserve 1 only when arms are genuinely ambiguous.
     section_hints: ["Methods", "Interventions", "Treatment", "Comparators"]
 
   # --- 2. Confounding & Bias Handling (Only for Obs data) ---
@@ -44,7 +49,8 @@ criteria:
       NA = Study uses RCT data only;
       1 = No;
       2 = Listed, but not justified;
-      3 = Listed and justified (clinical/DAG/literature rationale)
+      3 = Listed and justified (clinical/DAG/literature rationale).
+      Calibration note: Require explicit justification (clinical, domain, DAG, or prior literature) for 3; if covariates are merely listed/adjusted without rationale, score 2.
     section_hints: ["Methods", "Confounders", "Covariates", "Statistical Analysis"]
 
   - criterion_id: OBS_CONFOUNDING_STRATEGY
@@ -55,8 +61,8 @@ criteria:
     scoring_rules: >
       NA = Study uses RCT data only;
       1 = No adjustment / unclear;
-      2 = Standard methods (IPTW, PSM, simple regression);
-      3 = Advanced / robust (DR methods, multiple approaches, causal ML with explicit adjustment)
+      2 = Standard methods (IPTW, PSM, simple regression/covariate adjustment);
+      3 = Advanced / robust (DR methods, multiple approaches, causal ML with explicit adjustment).
     section_hints: ["Methods", "Statistical Analysis", "Causal Inference", "Propensity"]
 
   - criterion_id: OBS_BALANCE_DIAGNOSTICS
@@ -66,10 +72,11 @@ criteria:
     enum_values: ["NA", "1", "2", "3", "4"]
     scoring_rules: >
       NA = Study uses RCT data only;
-      1 = No balance assessment;
-      2 = Mentioned but not shown;
-      3 = Reported (SMD tables, plots);
-      4 = Thorough (before/after balance + thresholds + interpretation)
+      1 = No balance assessment reported in main text or accessible supplement;
+      2 = Mentioned or referenced only, with results missing or inaccessible in supplement;
+      3 = Reported (SMD tables, plots, or balance metrics present);
+      4 = Thorough (before/after balance + thresholds + interpretation).
+      Calibration note: Never score 3 or 4 if covariate balance numbers/plots are absent or unverified in accessible text/supplement.
     section_hints: ["Methods", "Results", "Balance", "Standardized Mean Difference"]
 
   - criterion_id: OBS_UNMEASURED_CONFOUNDING
@@ -80,9 +87,10 @@ criteria:
     scoring_rules: >
       NA = Study uses RCT data only;
       1 = Not mentioned;
-      2 = Acknowledged only;
-      3 = Discussed with reasoning;
-      4 = Quantified / analyzed (E-values, sensitivity analysis)
+      2 = Acknowledged only (e.g., noted in limitations, deferring to RCTs, or assuming ignorability/unconfoundedness without quantitative sensitivity analysis);
+      3 = Discussed with concrete domain/causal reasoning;
+      4 = Quantified / analyzed (E-values, sensitivity analysis, negative controls).
+      Calibration note: Do not score 3 when unmeasured confounding is only mentioned in limitations or handled via an unverified ignorability assumption without substantive causal analysis.
     section_hints: ["Methods", "Discussion", "Limitations", "Sensitivity Analysis"]
 
   # --- 3. Effect Modification Analysis ---
@@ -93,9 +101,10 @@ criteria:
     enum_values: ["1", "2", "3", "4"]
     scoring_rules: >
       1 = Data-driven only (no pre-specification);
-      2 = Listed but weak justification;
+      2 = Listed or discussed with limited clinical depth/maturity or secondary to feature/biomarker extraction;
       3 = Pre-specified based on clinical/biological rationale;
-      4 = Pre-specified + formally tested (interactions, hypotheses, statistical framework)
+      4 = Pre-specified + formally tested (interactions, hypotheses, statistical framework as a core aim).
+      Calibration note: Reserve 4 for studies where pre-specified treatment-by-modifier interaction is a central focus/test, and score 2 when discussion is shallow or primarily about feature extraction/selection.
     section_hints: ["Methods", "Subgroup Analysis", "Effect Modifiers", "Statistical Analysis"]
 
   - criterion_id: POSTHOC_EM
@@ -104,10 +113,11 @@ criteria:
     data_type: enum
     enum_values: ["0", "1", "2", "3"]
     scoring_rules: >
-      0 = No analysis of effect modifiers;
+      0 = No post-hoc discovery/analysis of effect modifiers (including when modifiers are pre-specified a priori or no post-hoc EM search is performed);
       1 = Feature importance only (no link to treatment effect);
       2 = SHAP / importance used (but misinterpreted as HTE);
-      3 = Methods partially or formally linked to HTE (e.g., subgroup splits, BLP, best linear projection)
+      3 = Methods partially or formally linked to HTE (e.g., subgroup splits, BLP, best linear projection).
+      Calibration note: Default to 0 whenever effect modifiers are pre-specified rather than discovered post-hoc or when no post-hoc EM analysis exists; do not inflate to 3 by default.
     section_hints: ["Results", "Discussion", "Feature Importance", "SHAP", "Subgroup"]
 
   # --- 4. ML Method & Modeling Approach ---
@@ -117,9 +127,9 @@ criteria:
     data_type: enum
     enum_values: ["1", "2", "3"]
     scoring_rules: >
-      1 = Prediction Only (prognostic risk score without treatment contrast);
-      2 = Outcome Modelling (e.g., S-learner, T-learner, parametric interaction);
-      3 = Custom CATE Function (e.g., Causal Forest, R-learner, DR-learner, TARNet, Dragonnet)
+      1 = Prediction Only (prognostic risk score or outcome/biomarker association without treatment-contrast estimation);
+      2 = Outcome Modelling (e.g., S-learner, T-learner, parametric/regression interaction or stratified treatment contrast);
+      3 = Custom CATE Function (e.g., Causal Forest, R-learner, DR-learner, TARNet, Dragonnet, dedicated HTE learners).
     section_hints: ["Methods", "Model", "Algorithm", "Causal Estimation"]
 
   - criterion_id: ML_METHOD_CLARITY
@@ -129,9 +139,10 @@ criteria:
     enum_values: ["1", "2", "3", "4"]
     scoring_rules: >
       1 = Not described;
-      2 = Named only;
-      3 = Partial (some details, missing key components);
-      4 = Fully described (architecture, loss, training, assumptions)
+      2 = Named only or mostly descriptive/high-level without equations/implementation detail needed for replication or using simpler statistical/non-ML methods;
+      3 = Partial or applied implementation (clear workflow/usage, though missing formal equations, novel method details, or full specs);
+      4 = Fully described (architecture, loss/objective, training, and key assumptions clearly specified).
+      Calibration note: Account for reproducibility and whether the study introduces/specifies full model mechanics vs. high-level descriptions or applied implementations.
     section_hints: ["Methods", "Model Architecture", "Training"]
 
   - criterion_id: OUTCOME_METHOD_ALIGNMENT
@@ -142,7 +153,7 @@ criteria:
     scoring_rules: >
       1 = Inappropriate (e.g., ignoring censoring in survival data);
       2 = Partially appropriate;
-      3 = Fully appropriate (e.g., survival-aware method for time-to-event)
+      3 = Fully appropriate (e.g., survival-aware method for time-to-event).
     section_hints: ["Methods", "Outcomes", "Survival Analysis", "Censoring"]
 
   - criterion_id: HYPERPARAM_TUNING
@@ -152,9 +163,10 @@ criteria:
     enum_values: ["1", "2", "3", "4"]
     scoring_rules: >
       1 = Not done / not reported;
-      2 = Done but unclear;
+      2 = Done or mentioned, but tuning procedure/search/details are unclear or omitted;
       3 = Proper (CV / search strategy described);
-      4 = Systematic + robust (CV + search + justification / multiple configs)
+      4 = Systematic + robust (CV + search + justification / multiple configs).
+      Calibration note: If hyperparameter tuning is mentioned without concrete search/tuning details in text or supplement, score 2 rather than 3.
     section_hints: ["Methods", "Hyperparameters", "Cross-Validation", "Implementation"]
 
   - criterion_id: OVERFITTING_CONTROL_BOOL
@@ -162,7 +174,9 @@ criteria:
     question: "Is sample splitting, honesty, or an independent testing dataset used to control for overfitting?"
     data_type: enum
     enum_values: ["1", "2"]
-    scoring_rules: "1 = No; 2 = Yes (sample splitting, honest trees, cross-fitting, or external/independent test set)"
+    scoring_rules: >
+      1 = No (no train/test split, cross-validation, honesty, or external validation);
+      2 = Yes (sample splitting, honest trees, cross-fitting, or external/independent test set).
     section_hints: ["Methods", "Validation", "Cross-fitting", "Honesty"]
 
   - criterion_id: OVERFITTING_CONTROL_DESC
@@ -178,9 +192,10 @@ criteria:
     data_type: enum
     enum_values: ["0", "1", "2"]
     scoring_rules: >
-      0 = Single model;
-      1 = Limited comparison;
-      2 = Systematic benchmarking (strong comparisons + ablations)
+      0 = Single model or comparing multiple candidate models/learners is not an aim/evaluation component of the study;
+      1 = Limited comparison (basic baselines or narrow comparison);
+      2 = Systematic benchmarking (strong comparisons + ablations).
+      Calibration note: Score 0 when model comparison is not an objective of the paper; do not score 1 or 2 just because multiple sub-analyses or metrics are present.
     section_hints: ["Methods", "Results", "Comparison", "Baseline"]
 
   # --- 5. Causal Objective & Estimand ---
@@ -197,9 +212,10 @@ criteria:
     data_type: enum
     enum_values: ["0", "1", "2"]
     scoring_rules: >
-      0 = Implicit (e.g., 'difference in outcome');
-      1 = Explicit ITE defined or Explicit CATE defined;
-      2 = Formal definition using counterfactual / potential outcomes (e.g., E[Y(1)-Y(0)|X])
+      0 = Implicit or not formally defined as a target estimand (e.g., general 'difference in outcome' or non-estimand focus);
+      1 = Explicit ITE or CATE defined in words/notation;
+      2 = Formal definition using counterfactual / potential outcomes (e.g., E[Y(1)-Y(0)|X]).
+      Calibration note: Score 0 when no causal estimand is formally targeted, and 1 when framed partially/indirectly alongside conditional or subgroup effects.
     section_hints: ["Methods", "Estimand", "Problem Formulation", "Notation"]
 
   - criterion_id: SURVIVAL_CAUSAL_ESTIMAND
@@ -210,9 +226,9 @@ criteria:
     scoring_rules: >
       NA = Outcome is not time-to-event / survival;
       0 = Not defined;
-      1 = Informal (e.g., 'survival benefit');
+      1 = Informal (e.g., 'survival benefit' or hazard/risk phrasing without formal estimand specification);
       2 = Defined (RMST / survival probability / AFT / HR);
-      3 = Fully specified: scale + time horizon + clinical interpretation
+      3 = Fully specified: scale + time horizon + clinical interpretation.
     section_hints: ["Methods", "Outcomes", "Survival", "RMST", "Hazard Ratio"]
 
   # --- 6. Treatment Effect Analyses & ITE Reporting ---
@@ -237,8 +253,9 @@ criteria:
     enum_values: ["1", "2", "3"]
     scoring_rules: >
       1 = Implicit only;
-      2 = Compared (recommended vs non-recommended groups);
-      3 = Formal policy evaluation (value function, uplift, decision curves)
+      2 = Compared or discussed for treatment selection/allocation across groups;
+      3 = Formal policy evaluation (value function, uplift, decision curves).
+      Calibration note: Score 2 when treatment allocation or decision guidance across patient groups is discussed even if a formal policy optimization/decision-curve framework is absent.
     section_hints: ["Methods", "Results", "Decision Curve", "Policy", "Clinical Utility"]
 
   - criterion_id: UNCERTAINTY_QUANTIFICATION
@@ -248,10 +265,10 @@ criteria:
     enum_values: ["0", "1", "2", "3", "4"]
     scoring_rules: >
       0 = No uncertainty reported;
-      1 = Minimal / weak uncertainty (model variability only);
-      2 = Summary-level uncertainty (ATE/subgroup CI);
+      1 = Minimal / weak uncertainty (e.g., point/basic intervals or model variability only);
+      2 = Summary-level uncertainty (ATE/subgroup CI or standard errors);
       3 = Individual-level uncertainty (CI/posterior per patient);
-      4 = High-quality uncertainty (individual + calibrated + validated)
+      4 = High-quality uncertainty (individual + calibrated + validated).
     section_hints: ["Methods", "Results", "Confidence Interval", "Uncertainty", "Calibration"]
 
   - criterion_id: BIOLOGICAL_PLAUSIBILITY
@@ -272,5 +289,5 @@ criteria:
       0 = No code, not mentioned;
       1 = Code mentioned / available on request;
       2 = Partial code (GitHub, scripts, unclear completeness);
-      3 = Full public repository (well-documented, accessible)
+      3 = Full public repository (well-documented, accessible).
     section_hints: ["Methods", "Data Availability", "Code Availability", "GitHub"]

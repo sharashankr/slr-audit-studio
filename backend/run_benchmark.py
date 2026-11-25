@@ -237,25 +237,38 @@ def main():
     if args.dry_run_match:
         return
 
-   with TestClient(app) as client:
+    with TestClient(app) as client:
         r_resp = client.post("/api/rubrics", json={"yaml_text": RUBRIC_PATH.read_text()})
         r_resp.raise_for_status()
         rubric_id = r_resp.json()["rubric_id"]
         print(f"\nRegistered rubric_id={rubric_id}")
 
+        ckpt_path = args.papers_dir / f".checkpoint_{args.split}.json"
+        ckpt = json.loads(ckpt_path.read_text()) if ckpt_path.exists() else {}
+        done_by_num = {int(item["record"]["paper_num"]): item for item in ckpt.get("completed", [])}
+
         pred_rows, mismatches = [], []
         for _, row in matched_gold.iterrows():
+            pnum = int(row["paper_num"])
             pdf_path: Path = row["matched_pdf"]
+            if pnum in done_by_num:
+                item = done_by_num[pnum]
+                pred_rows.append(item["record"])
+                mismatches.extend(item["mismatches"])
+                print(f"Resumed Paper {pnum:2d} ({pdf_path.name}) -> paper_id={item['record']['paper_id']}")
+                continue
+
             with pdf_path.open("rb") as f:
                 ing = client.post("/api/ingest", files={"file": (pdf_path.name, f, "application/pdf")})
             ing.raise_for_status()
             paper_id = ing.json()["paper_id"]
 
-            ext = client.post("/api/extract", json={"rubric_id": rubric_id, "paper_id": paper_id})
+            ext = client.post("/api/extract", json={"rubric_id": rubric_id, "paper_ids": [paper_id]})
             ext.raise_for_status()
-            cells = ext.json().get("cells", ext.json())
+            cells = ext.json()["extracted"][paper_id]
 
-            pred_record = {"paper_num": int(row["paper_num"]), "pdf_filename": pdf_path.name, "paper_id": paper_id}
+            pred_record = {"paper_num": pnum, "pdf_filename": pdf_path.name, "paper_id": paper_id}
+            paper_mismatches = []
             for cell in cells:
                 cid = cell["criterion_id"]
                 val = str(cell["value"]) if cell["value"] is not None else "NA"
@@ -263,8 +276,8 @@ def main():
                 if cid in SCORED_CRITERIA and cid in row:
                     g_val = str(row[cid]).strip()
                     if val != g_val:
-                        mismatches.append({
-                            "paper_num": int(row["paper_num"]),
+                        paper_mismatches.append({
+                            "paper_num": pnum,
                             "pdf": pdf_path.name,
                             "criterion": cid,
                             "gold": g_val,
@@ -273,8 +286,12 @@ def main():
                             "status": cell.get("critic_status"),
                             "quote": (cell.get("verbatim_quote") or "")[:120],
                         })
+
             pred_rows.append(pred_record)
-            print(f"Completed Paper {int(row['paper_num']):2d} ({pdf_path.name}) -> paper_id={paper_id}")
+            mismatches.extend(paper_mismatches)
+            done_by_num[pnum] = {"record": pred_record, "mismatches": paper_mismatches}
+            ckpt_path.write_text(json.dumps({"completed": list(done_by_num.values())}, indent=2))
+            print(f"Completed Paper {pnum:2d} ({pdf_path.name}) -> paper_id={paper_id}")
 
     pred_df = pd.DataFrame(pred_rows)
     pred_df.to_csv(args.papers_dir / f"predictions_{args.split}.csv", index=False)

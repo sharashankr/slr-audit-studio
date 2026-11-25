@@ -84,8 +84,14 @@ def compile_rubric(raw: str | dict) -> Rubric:
     return Rubric(name=spec["name"], version=spec.get("version", 1), criteria=criteria)
 
 
+class LintIssue(BaseModel):
+    criterion_id: str
+    problem: str
+    suggested_rewrite: str
+
+
 class LintReport(BaseModel):
-    ambiguous: list[dict] = Field(default_factory=list)   # [{criterion_id, problem, suggested_rewrite}]
+    ambiguous: list[LintIssue] = Field(default_factory=list)
 
 
 async def lint_rubric(rubric: Rubric, llm_json: LLMJson) -> LintReport:
