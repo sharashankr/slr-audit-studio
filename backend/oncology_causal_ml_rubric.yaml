@@ -1,0 +1,276 @@
+name: oncology-causal-ml-slr
+version: 1
+criteria:
+  # --- 1. Study Design & Context ---
+  - criterion_id: STUDY_DESIGN
+    kind: quality
+    question: "Study Design for training data (RCT / observational)"
+    data_type: enum
+    enum_values: ["1", "2"]
+    scoring_rules: "1 = Obs (observational cohort, EHR, registry, real-world data); 2 = RCT (randomized controlled trial data)"
+    section_hints: ["Methods", "Study Design", "Data Source", "Cohort"]
+
+  - criterion_id: PATIENT_POPULATION
+    kind: quality
+    question: "Patient population specificity and eligibility clarity"
+    data_type: enum
+    enum_values: ["1", "2", "3", "4"]
+    scoring_rules: >
+      1 = Vague (e.g., 'breast cancer patients');
+      2 = Some inclusion criteria OR dataset mentioned (e.g., SEER cohort);
+      3 = Clear IC/EC, dataset, timeframe, key eligibility;
+      4 = Full IC/EC + RCT eligibility, matching, ITT/as-treated, treatment switch over
+    section_hints: ["Methods", "Patients", "Eligibility", "Study Population"]
+
+  - criterion_id: COMPARATORS
+    kind: quality
+    question: "Comparators and treatment arm definition"
+    data_type: enum
+    enum_values: ["1", "2", "3", "4"]
+    scoring_rules: >
+      1 = Not clear / ambiguous;
+      2 = Treatments named only;
+      3 = Defined but missing details (dose/timing);
+      4 = Fully specified (protocol-level clarity, replicable clinically)
+    section_hints: ["Methods", "Interventions", "Treatment", "Comparators"]
+
+  # --- 2. Confounding & Bias Handling (Only for Obs data) ---
+  - criterion_id: OBS_CONFOUNDERS_ID
+    kind: quality
+    question: "Are key confounders identified and included? (Only for Obs data)"
+    data_type: enum
+    enum_values: ["NA", "1", "2", "3"]
+    scoring_rules: >
+      NA = Study uses RCT data only;
+      1 = No;
+      2 = Listed, but not justified;
+      3 = Listed and justified (clinical/DAG/literature rationale)
+    section_hints: ["Methods", "Confounders", "Covariates", "Statistical Analysis"]
+
+  - criterion_id: OBS_CONFOUNDING_STRATEGY
+    kind: quality
+    question: "Confounding Adjustment Strategy (Only for Obs data)"
+    data_type: enum
+    enum_values: ["NA", "1", "2", "3"]
+    scoring_rules: >
+      NA = Study uses RCT data only;
+      1 = No adjustment / unclear;
+      2 = Standard methods (IPTW, PSM, simple regression);
+      3 = Advanced / robust (DR methods, multiple approaches, causal ML with explicit adjustment)
+    section_hints: ["Methods", "Statistical Analysis", "Causal Inference", "Propensity"]
+
+  - criterion_id: OBS_BALANCE_DIAGNOSTICS
+    kind: quality
+    question: "Balance Diagnostics (Only for Obs data)"
+    data_type: enum
+    enum_values: ["NA", "1", "2", "3", "4"]
+    scoring_rules: >
+      NA = Study uses RCT data only;
+      1 = No balance assessment;
+      2 = Mentioned but not shown;
+      3 = Reported (SMD tables, plots);
+      4 = Thorough (before/after balance + thresholds + interpretation)
+    section_hints: ["Methods", "Results", "Balance", "Standardized Mean Difference"]
+
+  - criterion_id: OBS_UNMEASURED_CONFOUNDING
+    kind: quality
+    question: "Unmeasured Confounding Handling (Only for Obs data)"
+    data_type: enum
+    enum_values: ["NA", "1", "2", "3", "4"]
+    scoring_rules: >
+      NA = Study uses RCT data only;
+      1 = Not mentioned;
+      2 = Acknowledged only;
+      3 = Discussed with reasoning;
+      4 = Quantified / analyzed (E-values, sensitivity analysis)
+    section_hints: ["Methods", "Discussion", "Limitations", "Sensitivity Analysis"]
+
+  # --- 3. Effect Modification Analysis ---
+  - criterion_id: PREDEFINED_EM
+    kind: quality
+    question: "Predefined Effect Modification"
+    data_type: enum
+    enum_values: ["1", "2", "3", "4"]
+    scoring_rules: >
+      1 = Data-driven only (no pre-specification);
+      2 = Listed but weak justification;
+      3 = Pre-specified based on clinical/biological rationale;
+      4 = Pre-specified + formally tested (interactions, hypotheses, statistical framework)
+    section_hints: ["Methods", "Subgroup Analysis", "Effect Modifiers", "Statistical Analysis"]
+
+  - criterion_id: POSTHOC_EM
+    kind: quality
+    question: "Post-hoc Effect Modification"
+    data_type: enum
+    enum_values: ["0", "1", "2", "3"]
+    scoring_rules: >
+      0 = No analysis of effect modifiers;
+      1 = Feature importance only (no link to treatment effect);
+      2 = SHAP / importance used (but misinterpreted as HTE);
+      3 = Methods partially or formally linked to HTE (e.g., subgroup splits, BLP, best linear projection)
+    section_hints: ["Results", "Discussion", "Feature Importance", "SHAP", "Subgroup"]
+
+  # --- 4. ML Method & Modeling Approach ---
+  - criterion_id: ML_METHOD_TYPE
+    kind: quality
+    question: "Method Type"
+    data_type: enum
+    enum_values: ["1", "2", "3"]
+    scoring_rules: >
+      1 = Prediction Only (prognostic risk score without treatment contrast);
+      2 = Outcome Modelling (e.g., S-learner, T-learner, parametric interaction);
+      3 = Custom CATE Function (e.g., Causal Forest, R-learner, DR-learner, TARNet, Dragonnet)
+    section_hints: ["Methods", "Model", "Algorithm", "Causal Estimation"]
+
+  - criterion_id: ML_METHOD_CLARITY
+    kind: quality
+    question: "Method Clarity / Description"
+    data_type: enum
+    enum_values: ["1", "2", "3", "4"]
+    scoring_rules: >
+      1 = Not described;
+      2 = Named only;
+      3 = Partial (some details, missing key components);
+      4 = Fully described (architecture, loss, training, assumptions)
+    section_hints: ["Methods", "Model Architecture", "Training"]
+
+  - criterion_id: OUTCOME_METHOD_ALIGNMENT
+    kind: quality
+    question: "Outcome–Method Alignment"
+    data_type: enum
+    enum_values: ["1", "2", "3"]
+    scoring_rules: >
+      1 = Inappropriate (e.g., ignoring censoring in survival data);
+      2 = Partially appropriate;
+      3 = Fully appropriate (e.g., survival-aware method for time-to-event)
+    section_hints: ["Methods", "Outcomes", "Survival Analysis", "Censoring"]
+
+  - criterion_id: HYPERPARAM_TUNING
+    kind: quality
+    question: "Hyperparameter Tuning"
+    data_type: enum
+    enum_values: ["1", "2", "3", "4"]
+    scoring_rules: >
+      1 = Not done / not reported;
+      2 = Done but unclear;
+      3 = Proper (CV / search strategy described);
+      4 = Systematic + robust (CV + search + justification / multiple configs)
+    section_hints: ["Methods", "Hyperparameters", "Cross-Validation", "Implementation"]
+
+  - criterion_id: OVERFITTING_CONTROL_BOOL
+    kind: quality
+    question: "Is sample splitting, honesty, or an independent testing dataset used to control for overfitting?"
+    data_type: enum
+    enum_values: ["1", "2"]
+    scoring_rules: "1 = No; 2 = Yes (sample splitting, honest trees, cross-fitting, or external/independent test set)"
+    section_hints: ["Methods", "Validation", "Cross-fitting", "Honesty"]
+
+  - criterion_id: OVERFITTING_CONTROL_DESC
+    kind: extraction
+    question: "How was overfitting controlled?"
+    data_type: string
+    scoring_rules: "Extract concise description of sample splitting, honest splitting, cross-fitting, regularization, or external validation."
+    section_hints: ["Methods", "Validation", "Cross-fitting"]
+
+  - criterion_id: MULTI_MODEL_COMPARISON
+    kind: quality
+    question: "Multi-Model Comparison"
+    data_type: enum
+    enum_values: ["0", "1", "2"]
+    scoring_rules: >
+      0 = Single model;
+      1 = Limited comparison;
+      2 = Systematic benchmarking (strong comparisons + ablations)
+    section_hints: ["Methods", "Results", "Comparison", "Baseline"]
+
+  # --- 5. Causal Objective & Estimand ---
+  - criterion_id: PRIMARY_OBJECTIVE_DESC
+    kind: extraction
+    question: "Primary study objective"
+    data_type: string
+    scoring_rules: "Extract the stated primary clinical or methodological objective of the study."
+    section_hints: ["Abstract", "Introduction", "Objectives"]
+
+  - criterion_id: GENERIC_CAUSAL_ESTIMAND
+    kind: quality
+    question: "Is generic causal estimand clearly defined?"
+    data_type: enum
+    enum_values: ["0", "1", "2"]
+    scoring_rules: >
+      0 = Implicit (e.g., 'difference in outcome');
+      1 = Explicit ITE defined or Explicit CATE defined;
+      2 = Formal definition using counterfactual / potential outcomes (e.g., E[Y(1)-Y(0)|X])
+    section_hints: ["Methods", "Estimand", "Problem Formulation", "Notation"]
+
+  - criterion_id: SURVIVAL_CAUSAL_ESTIMAND
+    kind: quality
+    question: "Survival Causal Estimand"
+    data_type: enum
+    enum_values: ["NA", "0", "1", "2", "3"]
+    scoring_rules: >
+      NA = Outcome is not time-to-event / survival;
+      0 = Not defined;
+      1 = Informal (e.g., 'survival benefit');
+      2 = Defined (RMST / survival probability / AFT / HR);
+      3 = Fully specified: scale + time horizon + clinical interpretation
+    section_hints: ["Methods", "Outcomes", "Survival", "RMST", "Hazard Ratio"]
+
+  # --- 6. Treatment Effect Analyses & ITE Reporting ---
+  - criterion_id: TE_TYPE_LEVEL_DESC
+    kind: extraction
+    question: "What type and level of treatment effect is estimated?"
+    data_type: string
+    scoring_rules: "Describe the scale and granularity of the treatment effect (e.g., individual risk difference, CATE on RMST, subgroup HR)."
+    section_hints: ["Methods", "Results", "Treatment Effect"]
+
+  - criterion_id: TE_EVALUATION_RIGOR_DESC
+    kind: extraction
+    question: "How rigorously is the treatment effect evaluated?"
+    data_type: string
+    scoring_rules: "Summarize evaluation metrics and validation checks used (e.g., Qini/AUUC, RATE, calibration plots, subgroup stratification)."
+    section_hints: ["Methods", "Results", "Evaluation", "Validation"]
+
+  - criterion_id: CLINICAL_DECISION_READINESS
+    kind: quality
+    question: "Clinical Decision Readiness"
+    data_type: enum
+    enum_values: ["1", "2", "3"]
+    scoring_rules: >
+      1 = Implicit only;
+      2 = Compared (recommended vs non-recommended groups);
+      3 = Formal policy evaluation (value function, uplift, decision curves)
+    section_hints: ["Methods", "Results", "Decision Curve", "Policy", "Clinical Utility"]
+
+  - criterion_id: UNCERTAINTY_QUANTIFICATION
+    kind: quality
+    question: "How is uncertainty in treatment effects quantified?"
+    data_type: enum
+    enum_values: ["0", "1", "2", "3", "4"]
+    scoring_rules: >
+      0 = No uncertainty reported;
+      1 = Minimal / weak uncertainty (model variability only);
+      2 = Summary-level uncertainty (ATE/subgroup CI);
+      3 = Individual-level uncertainty (CI/posterior per patient);
+      4 = High-quality uncertainty (individual + calibrated + validated)
+    section_hints: ["Methods", "Results", "Confidence Interval", "Uncertainty", "Calibration"]
+
+  - criterion_id: BIOLOGICAL_PLAUSIBILITY
+    kind: quality
+    question: "Is the clinical or biological plausibility of identified effect modifiers discussed (e.g. in light of literature, clinical experience)?"
+    data_type: enum
+    enum_values: ["0", "1"]
+    scoring_rules: "0 = Not Discussed; 1 = Discussed"
+    section_hints: ["Discussion", "Biological", "Mechanism", "Clinical Implications"]
+
+  # --- 7. Reproducibility & Code Availability ---
+  - criterion_id: CODE_AVAILABILITY
+    kind: quality
+    question: "Code Availability"
+    data_type: enum
+    enum_values: ["0", "1", "2", "3"]
+    scoring_rules: >
+      0 = No code, not mentioned;
+      1 = Code mentioned / available on request;
+      2 = Partial code (GitHub, scripts, unclear completeness);
+      3 = Full public repository (well-documented, accessible)
+    section_hints: ["Methods", "Data Availability", "Code Availability", "GitHub"]
