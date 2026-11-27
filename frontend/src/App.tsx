@@ -76,8 +76,8 @@ function renderCellValue(val: unknown): string {
 
 export function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const matrixSectionRef = useRef<HTMLElement | null>(null);
-  const uploadSectionRef = useRef<HTMLElement | null>(null);
+  const matrixSectionRef = useRef<HTMLDivElement | null>(null);
+  const uploadSectionRef = useRef<HTMLDivElement | null>(null);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeNav, setActiveNav] = useState<"studio" | "matrix" | "rubric">("studio");
@@ -188,8 +188,13 @@ export function App() {
       const screenRes = await api.screenPapers(rubricId, targets);
       setPrismaCounts(screenRes.prisma);
 
-      const survivors =
-        screenRes.survivors.length > 0 ? screenRes.survivors : targets;
+      const survivors = screenRes.survivors;
+      if (survivors.length === 0) {
+        setBannerMsg(
+          "PRISMA screening excluded all selected papers. No extraction calls were needed."
+        );
+        return;
+      }
 
       setPipelineStage(
         `Stage 2/2: Extracting & Critic-verifying ${survivors.length} paper(s)...`

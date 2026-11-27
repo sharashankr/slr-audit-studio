@@ -18,6 +18,7 @@ from docling.document_converter import DocumentConverter
 MAX_CHARS = 2400          # ~600 tokens; split long sections on paragraph boundaries
 PARSER_NAME = "docling"
 
+_SKIP_EMBED_RE = re.compile(r"(^|\s|>)(references|bibliography|works cited|acknowledg(e)?ments)(\s|$)", re.I)
 
 @dataclass
 class Chunk:
@@ -135,9 +136,10 @@ def ingest_pdf(
     path: Path,
     pdf_uri: str,
     embed_fn: Callable[[list[str]], list[list[float]]] | None = None,
+    workspace_id: str = "default",
 ) -> str:
     digest = sha256_file(path)
-    row = conn.execute("SELECT paper_id FROM papers WHERE sha256=%s", (digest,)).fetchone()
+    row = conn.execute("SELECT paper_id FROM papers WHERE sha256=%s AND workspace_id=%s", (digest, workspace_id)).fetchone()
     if row:
         return str(row[0])                       # idempotent: same bytes -> same record
 
@@ -147,13 +149,22 @@ def ingest_pdf(
     import docling
     with conn.transaction():
         paper_id = conn.execute(
-            """INSERT INTO papers (sha256, doi, title, abstract, pdf_uri, parser_name, parser_version, page_sizes)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING paper_id""",
+            """INSERT INTO papers (sha256, doi, title, abstract, pdf_uri, parser_name, parser_version, page_sizes, workspace_id)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING paper_id""",
             (digest, meta["doi"], meta["title"], meta["abstract"], pdf_uri, PARSER_NAME,
              getattr(docling, "__version__", "unknown"),
-             json.dumps({str(k): list(v) for k, v in page_sizes.items()})),
+             json.dumps({str(k): list(v) for k, v in page_sizes.items()}),
+             workspace_id),
         ).fetchone()[0]
-        embeddings = embed_fn([c.text for c in chunks]) if embed_fn else [None] * len(chunks)
+        to_embed_idx = [
+            i for i, c in enumerate(chunks)
+            if c.kind != "figure" and not _SKIP_EMBED_RE.search(c.section)
+        ]
+        embeddings: list[list[float] | None] = [None] * len(chunks)
+        if embed_fn and to_embed_idx:
+            vecs = embed_fn([chunks[i].text for i in to_embed_idx])
+            for idx, vec in zip(to_embed_idx, vecs):
+                embeddings[idx] = vec
         for c, emb in zip(chunks, embeddings):
             conn.execute(
                 """INSERT INTO chunks (paper_id, ordinal, section, kind, text, page_start, page_end,

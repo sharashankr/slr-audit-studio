@@ -14,10 +14,25 @@ export function resolvePdfUrl(pdfUrl: string): string {
   return `${API_BASE}${pdfUrl.startsWith("/") ? "" : "/"}${pdfUrl}`;
 }
 
+// ---------------------------------------------------------------------------
+// Workspace isolation — a random UUID stored in localStorage so each browser
+// session gets its own siloed view of papers and rubrics on the shared backend.
+// ---------------------------------------------------------------------------
+function getWorkspaceId(): string {
+  const key = "slr_ws_id";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: {
       ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+      "X-Workspace-ID": getWorkspaceId(),
       ...init?.headers,
     },
     ...init,

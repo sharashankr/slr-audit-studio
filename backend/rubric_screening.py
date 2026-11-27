@@ -139,6 +139,15 @@ async def screen_paper(conn, rubric_id: str, rubric: Rubric, paper_id: str, stag
     crits = [c for c in rubric.criteria if c.stage == stage and c.kind in ("inclusion", "exclusion")]
     if not crits:
         return "include"
+    existing = conn.execute(
+        """SELECT coalesce(human_override, decision)
+           FROM screening_decisions
+           WHERE rubric_id=%s AND paper_id=%s AND stage=%s
+           ORDER BY id DESC LIMIT 1""",
+        (rubric_id, paper_id, stage),
+    ).fetchone()
+    if existing:
+        return existing[0]
     if stage == "abstract":
         r = conn.execute("SELECT title, abstract FROM papers WHERE paper_id=%s", (paper_id,)).fetchone()
         context = f"TITLE: {r[0]}\n\nABSTRACT: {r[1] or '(none)'}"
