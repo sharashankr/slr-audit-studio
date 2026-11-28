@@ -710,7 +710,8 @@ def api_matrix(rubric_id: str, request: Request):
     ws = _workspace(request)
     with get_conn() as conn:
         papers = conn.execute(
-            "SELECT paper_id::text, title, pdf_uri AS pdf_url FROM papers WHERE workspace_id=%s ORDER BY created_at",
+            """SELECT paper_id::text, title, pdf_uri, doi, year
+               FROM papers WHERE workspace_id=%s ORDER BY created_at""",
             (ws,),
         ).fetchall()
         rubric = conn.execute(
