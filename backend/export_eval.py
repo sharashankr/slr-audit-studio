@@ -16,13 +16,15 @@ from rubric_screening import LLMJson, prisma_counts
 
 
 # ---------------- Evidence matrix ----------------
-def load_matrix(conn, rubric_id: str, include_unverified: bool = False) -> pd.DataFrame:
+def load_matrix(conn, rubric_id: str, include_unverified: bool = False, *, workspace_id: str | None = None) -> pd.DataFrame:
     ok = "('verified','approved','overridden')" if not include_unverified else "('verified','approved','overridden','needs_review')"
+    workspace_filter = "AND p.workspace_id=%s" if workspace_id is not None else ""
+    params = (rubric_id, workspace_id) if workspace_id is not None else (rubric_id,)
     rows = conn.execute(f"""
         SELECT p.paper_id, p.doi, p.title, p.year, c.criterion_id, c.value, c.verbatim_quote, c.page_number,
                c.confidence, c.critic_status
         FROM current_cells c JOIN papers p USING (paper_id)
-        WHERE c.rubric_id=%s AND c.critic_status IN {ok}""", (rubric_id,)).fetchall()
+        WHERE c.rubric_id=%s AND c.critic_status IN {ok} {workspace_filter}""", params).fetchall()
     cols = ["paper_id", "doi", "title", "year", "criterion_id", "value", "quote", "page", "confidence", "status"]
     return pd.DataFrame(rows, columns=cols)
 

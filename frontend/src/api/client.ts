@@ -1,3 +1,4 @@
+import { runBrowserModel, type BrowserModel } from "./browserModel";
 import type {
   MatrixCell,
   MatrixResponse,
@@ -30,18 +31,41 @@ function getWorkspaceId(): string {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
     headers: {
       ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       "X-Workspace-ID": getWorkspaceId(),
       ...init?.headers,
     },
-    ...init,
   });
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`${res.status} ${res.statusText}: ${detail}`);
   }
   return res.json() as Promise<T>;
+}
+
+export function browserOperation<T>(
+  action: string, params: object, model: BrowserModel,
+  onProgress?: (completed: number, total: number) => void,
+) {
+  return runBrowserModel<T>(API_BASE, getWorkspaceId(), action, params, model, onProgress);
+}
+
+async function download(path: string): Promise<Blob> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      headers: { "X-Workspace-ID": getWorkspaceId() },
+    });
+  } catch {
+    throw new Error("Studio could not reach the export endpoint. Check that the backend is running, then try the download again.");
+  }
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    throw new Error(typeof detail?.detail === "string" ? detail.detail : `Export failed (HTTP ${response.status}).`);
+  }
+  return response.blob();
 }
 
 export const api = {
@@ -68,12 +92,13 @@ export const api = {
       body: JSON.stringify({ yaml_text: yamlText }),
     }),
 
-  ingestPdf: (file: File) => {
+  ingestPdf: (file: File, browserModel = false) => {
     const fd = new FormData();
     fd.append("file", file);
     return request<{ paper_id: string; pdf_url: string }>("/api/ingest", {
       method: "POST",
       body: fd,
+      headers: browserModel ? { "X-SLR-Retrieval": "keywords" } : undefined,
     });
   },
 
@@ -94,6 +119,8 @@ export const api = {
       method: "POST",
     }),
 
-  exportXlsxUrl: (rubricId: string) =>
-    `${API_BASE}/api/export/${encodeURIComponent(rubricId)}/xlsx`,
+  exportXlsx: (rubricId: string) => download(`/api/export/${encodeURIComponent(rubricId)}/xlsx`),
+
+  exportAnnotatedPdf: (rubricId: string, paperId: string) =>
+    download(`/api/export/${encodeURIComponent(rubricId)}/papers/${encodeURIComponent(paperId)}/annotated.pdf`),
 };

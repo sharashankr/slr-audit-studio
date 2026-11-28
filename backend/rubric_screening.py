@@ -194,8 +194,19 @@ SELECT stage, final, coalesce(exclusion_code,'-') code, count(*) FROM latest GRO
 """
 
 
-def prisma_counts(conn, rubric_id: str, identified: int, duplicates_removed: int) -> dict[str, Any]:
-    rows = conn.execute(PRISMA_SQL, (rubric_id,)).fetchall()
+def prisma_counts(
+    conn, rubric_id: str, identified: int, duplicates_removed: int, *, workspace_id: str | None = None,
+) -> dict[str, Any]:
+    sql = PRISMA_SQL
+    params = (rubric_id,)
+    if workspace_id is not None:
+        sql = sql.replace(
+            "WHERE rubric_id=%s",
+            "WHERE rubric_id=%s AND paper_id IN (SELECT paper_id FROM papers WHERE workspace_id=%s)",
+            1,
+        )
+        params = (rubric_id, workspace_id)
+    rows = conn.execute(sql, params).fetchall()
     ex: dict[str, dict[str, int]] = {"abstract": {}, "methods": {}}
     stage_totals = {"abstract": {"include": 0, "exclude": 0, "unclear": 0}, "methods": {"include": 0, "exclude": 0, "unclear": 0}}
     for stage, final, code, n in rows:

@@ -187,6 +187,20 @@ def _fmt_indexed(chunks: list[dict]) -> tuple[str, dict[str, dict]]:
     return "\n\n".join(parts), ref_map
 
 
+def _with_examples(payload: dict, criteria: list[Criterion], examples: dict | None) -> dict:
+    if not examples:
+        return payload
+    relevant = {c.criterion_id: examples[c.criterion_id] for c in criteria if c.criterion_id in examples}
+    if relevant:
+        payload["examples_from_other_papers"] = relevant
+        payload["example_instructions"] = (
+            "Use the reference scores and any reviewer notes only to calibrate how you apply the rubric. "
+            "Paper numbers identify examples, not the target paper. Ground answers and quotes only "
+            "in the target paper chunks below. Do not copy scores, quotes, or facts from examples."
+        )
+    return payload
+
+
 async def extract_cell(
     c: Criterion,
     paper_id: str,
@@ -196,6 +210,8 @@ async def extract_cell(
     llm_verify: LLMJson,
     initial_feedback: str = "",
     initial_chunks: list[dict] | None = None,
+    allow_full_context: bool = True,
+    examples: dict | None = None,
 ) -> CellResult:
     if initial_chunks is not None:
         chunks, used_full = initial_chunks, True
@@ -207,11 +223,12 @@ async def extract_cell(
 
 
     for attempt in range(1, MAX_ATTEMPTS + 2):                       # last pass = full-context fallback
-        if attempt > MAX_ATTEMPTS and not used_full:
+        if attempt > MAX_ATTEMPTS and not used_full and allow_full_context:
             chunks, used_full, feedback = await full_text_fn(paper_id), True, feedback + "\nSearch the full paper."
         elif attempt > MAX_ATTEMPTS:
             break
-        user = json.dumps({"criterion": c.model_dump(exclude={"stage"}), "retry_feedback": feedback or None}) + "\n\nCHUNKS:\n" + _fmt(chunks)
+        payload = {"criterion": c.model_dump(exclude={"stage"}), "retry_feedback": feedback or None}
+        user = json.dumps(_with_examples(payload, [c], examples)) + "\n\nCHUNKS:\n" + _fmt(chunks)
         ex = Extraction(**await llm_extract(EXTRACT_SYS, user, Extraction))
 
         if not ex.reported:
@@ -219,6 +236,9 @@ async def extract_cell(
             if used_full:
                 return CellResult(c.criterion_id, None, None, None, None, None, ex.confidence, "not_reported",
                                   ex.caveats or "Not reported in full text", attempt)
+            if not allow_full_context:
+                return CellResult(c.criterion_id, None, None, None, None, None, ex.confidence,
+                                  "needs_review", "No evidence in retrieved excerpts; full paper not checked", attempt)
             feedback = "You reported 'not reported' from limited chunks; re-check carefully."
             chunks, used_full = await full_text_fn(paper_id), True
             continue
@@ -232,6 +252,9 @@ async def extract_cell(
         if unquoted_absence:
             # Require full-text scan before confirming an unquoted 'not mentioned' / 'NA' enum score
             if not used_full:
+                if not allow_full_context:
+                    return CellResult(c.criterion_id, None, None, None, None, None, ex.confidence,
+                                      "needs_review", "Absence cannot be confirmed from retrieved excerpts", attempt)
                 feedback = f"You selected '{ex.value}' (not mentioned / NA) without a quote from limited chunks; verify across the full paper."
                 chunks, used_full = await full_text_fn(paper_id), True
                 continue
@@ -285,10 +308,11 @@ async def _extract_batch(
     ref_map: dict[str, dict],
     used_full: bool,
     llm_extract: LLMJson,
+    examples: dict | None = None,
 ) -> tuple[dict[str, tuple[BatchExtractionItem, dict | None, bool]], list[tuple[Criterion, str]]]:
     """Run one batched extraction + deterministic grounding; return (passed_candidates, retry_entries)."""
     payload = [c.model_dump(exclude={"stage"}) for c in batch]
-    user = json.dumps({"criteria": payload}) + "\n\nCHUNKS:\n" + paper_text
+    user = json.dumps(_with_examples({"criteria": payload}, batch, examples)) + "\n\nCHUNKS:\n" + paper_text
     out = BatchExtractionOut(**await llm_extract(BATCH_EXTRACT_SYS, user, BatchExtractionOut))
     by_id = {item.criterion_id: item for item in out.items}
 
@@ -435,6 +459,9 @@ async def extract_paper(
     model_version: str,
     concurrency: int = 6,
     skip_criterion_ids: set[str] | None = None,
+    allow_full_context: bool = True,
+    examples: dict | None = None,
+    on_progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> list[CellResult]:
     skip = skip_criterion_ids or set()
     todo = [c for c in rubric.criteria if c.kind in ("extraction", "quality") and c.criterion_id not in skip]
@@ -444,7 +471,7 @@ async def extract_paper(
     crit_by_id = {c.criterion_id: c for c in todo}
     full_chunks = await full_text_fn(paper_id)
     full_text, ref_map = _fmt_indexed(full_chunks)
-    use_full_batch = bool(full_chunks) and len(full_text) <= MAX_FULL_CONTEXT_CHARS
+    use_full_batch = allow_full_context and bool(full_chunks) and len(full_text) <= MAX_FULL_CONTEXT_CHARS
     print(f"[extract] paper={paper_id[:8]} todo={len(todo)} chunks={len(full_chunks)} chars={len(full_text)} full_batch={use_full_batch}", flush=True)
 
     results: list[CellResult] = []
@@ -461,7 +488,7 @@ async def extract_paper(
         rest_non_obs = non_obs[BATCH_SIZE:]
 
         if first_batch:
-            cands, ret = await _extract_batch(first_batch, full_chunks, full_text, ref_map, True, llm_extract)
+            cands, ret = await _extract_batch(first_batch, full_chunks, full_text, ref_map, True, llm_extract, examples)
             candidates.update(cands)
             retry_entries.extend(ret)
 
@@ -473,7 +500,7 @@ async def extract_paper(
             retry_entries = [(c, fb) for c, fb in retry_entries if c.criterion_id != "STUDY_DESIGN"]
             design_res = await extract_cell(
                 design_crit, paper_id, retrieve_fn, full_text_fn, llm_extract, llm_verify,
-                initial_chunks=full_chunks,
+                initial_chunks=full_chunks, examples=examples,
             )
             results.append(design_res)
             is_rct = str(design_res.value) == "2"
@@ -490,7 +517,7 @@ async def extract_paper(
 
         async def run_grp(grp: list[Criterion]):
             async with sem:
-                return await _extract_batch(grp, full_chunks, full_text, ref_map, True, llm_extract)
+                return await _extract_batch(grp, full_chunks, full_text, ref_map, True, llm_extract, examples)
 
         groups = [remaining[i : i + BATCH_SIZE] for i in range(0, len(remaining), BATCH_SIZE)]
         for cands, ret in await asyncio.gather(*(run_grp(g) for g in groups)):
@@ -502,23 +529,34 @@ async def extract_paper(
         verified_res, critic_rejected = await _verify_batch(crit_by_id, candidates, full_text, llm_verify)
         results.extend(verified_res)
         _save_cells(conn, rubric_id, paper_id, verified_res, model_version)
+        if on_progress:
+            await on_progress(len(results), len(todo))
         retry_entries.extend(critic_rejected)
     else:
         retry_entries = [(c, "") for c in todo]
 
-    # 4. Targeted single-criterion retry ONLY for items that failed batch grounding or Critic
+    # Run targeted extraction for criteria that need an individual pass.
     if retry_entries:
-        print(f"[retry] paper={paper_id[:8]} running {len(retry_entries)} single-criterion retries: {[c.criterion_id for c, _ in retry_entries]}", flush=True)
+        total = len(retry_entries)
+        stage = "retry" if use_full_batch else "extract"
+        print(f"[{stage}] paper={paper_id[:8]} queued {total} individual criteria", flush=True)
+        completed = 0
         sem = asyncio.Semaphore(concurrency)
         retry_chunks = full_chunks if use_full_batch else None
 
         async def one(c: Criterion, fb: str):
+            nonlocal completed
             async with sem:
                 res = await extract_cell(
                     c, paper_id, retrieve_fn, full_text_fn, llm_extract, llm_verify,
                     initial_feedback=fb, initial_chunks=retry_chunks,
+                    allow_full_context=allow_full_context, examples=examples,
                 )
                 _save_cells(conn, rubric_id, paper_id, [res], model_version)
+                completed += 1
+                if on_progress:
+                    await on_progress(len(results) + completed, len(todo))
+                print(f"[{stage}] paper={paper_id[:8]} saved {completed}/{total} individual criteria", flush=True)
                 return res
 
         results.extend(await asyncio.gather(*(one(c, fb) for c, fb in retry_entries)))

@@ -5,6 +5,7 @@ import {
   X,
   Quote,
   Edit3,
+  Download,
   ShieldCheck,
 } from "lucide-react";
 import type { MatrixCell, PaperSummary } from "../types/api";
@@ -15,6 +16,7 @@ interface Props {
   cell: MatrixCell | null;
   paper: PaperSummary | undefined;
   onClose: () => void;
+  onExportPdf: (paper: PaperSummary) => Promise<void>;
   onApprove: (cellId: number) => Promise<void>;
   onOverride: (cellId: number, value: unknown, reason: string) => Promise<void>;
 }
@@ -29,12 +31,15 @@ export function InspectorDrawer({
   cell,
   paper,
   onClose,
+  onExportPdf,
   onApprove,
   onOverride,
 }: Props) {
   const [editValue, setEditValue] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [pdfExportError, setPdfExportError] = useState<{ paperId: string; message: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -116,6 +121,35 @@ export function InspectorDrawer({
               <X className="h-5 w-5" />
             </button>
           </div>
+          {paper && (
+            <div className="border-b border-[#E2E8F0] px-5 py-3">
+              <button
+                type="button"
+                disabled={exportingPdf}
+                onClick={async () => {
+                  setPdfExportError(null);
+                  setExportingPdf(true);
+                  try {
+                    await onExportPdf(paper);
+                  } catch (error) {
+                    setPdfExportError({
+                      paperId: paper.paper_id,
+                      message: error instanceof Error ? error.message : "PDF export failed.",
+                    });
+                  } finally {
+                    setExportingPdf(false);
+                  }
+                }}
+                className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                <Download className="h-4 w-4" />
+                {exportingPdf ? "Preparing PDF…" : "Download annotated PDF"}
+              </button>
+              {pdfExportError?.paperId === paper.paper_id && (
+                <p role="alert" className="mt-2 text-xs text-rose-700">{pdfExportError.message}</p>
+              )}
+            </div>
+          )}
 
           <div className="flex-1 space-y-5 overflow-y-auto p-5">
             {/* Status & Confidence */}

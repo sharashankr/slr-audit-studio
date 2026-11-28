@@ -5,6 +5,8 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,7 +19,6 @@ import pandas as pd
 import yaml
 from fastapi.testclient import TestClient
 
-from main import app
 
 DEFAULT_PAPERS_DIR = Path("/Users/sharathchandrashankar/Documents/Papers")
 DEFAULT_XLSX_PATH = BACKEND_DIR / "data" / "gold_standard.xlsx"
@@ -207,25 +208,67 @@ def score_predictions(gold_df: pd.DataFrame, pred_df: pd.DataFrame) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
+def build_few_shot_examples(calibration: pd.DataFrame) -> dict[str, list[dict]]:
+    examples: dict[str, list[dict]] = {}
+    for row in calibration.to_dict("records"):
+        for cid in SCORED_CRITERIA:
+            example = {"example_paper": int(row["paper_num"]), "reference_score": row[cid]}
+            if note := row.get(f"{cid}__comment"):
+                example["reviewer_note"] = note
+            examples.setdefault(cid, []).append(example)
+    return examples
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--papers-dir", type=Path, default=DEFAULT_PAPERS_DIR)
     parser.add_argument("--xlsx", type=Path, default=DEFAULT_XLSX_PATH)
     parser.add_argument("--split", choices=["calibration", "test", "all"], default="calibration")
+    parser.add_argument("--paper-numbers", nargs="+", type=int)
+    parser.add_argument("--calibration-count", type=int, default=5)
+    parser.add_argument("--rubric", type=Path, default=RUBRIC_PATH)
+    parser.add_argument("--output-dir", type=Path, help="Use a new directory for a fresh run")
+    parser.add_argument("--resume-since", type=datetime.fromisoformat,
+                        help="Resume extraction from the specified run start (ISO timestamp with timezone)")
+    parser.add_argument("--few-shot", action="store_true",
+                        help="Use reference scores and reviewer notes from the calibration split")
     parser.add_argument("--dry-run-match", action="store_true", help="Verify PDF matching without calling APIs")
     args = parser.parse_args()
+    if args.resume_since is not None:
+        if not args.output_dir or not args.output_dir.is_dir() or args.resume_since.utcoffset() is None:
+            parser.error("--resume-since requires an existing --output-dir and a timezone-aware timestamp")
+
+    if args.few_shot and (
+        args.split != "test" or not args.paper_numbers or not args.output_dir or args.resume_since is not None
+    ):
+        parser.error("--few-shot requires --split test, explicit --paper-numbers, and a fresh --output-dir")
 
     gold = load_gold_workbook(args.xlsx)
+    if args.paper_numbers:
+        gold = gold[gold["paper_num"].isin(args.paper_numbers)].copy()
+        missing = set(args.paper_numbers) - set(gold["paper_num"])
+        if missing:
+            parser.error(f"Paper numbers missing from workbook: {sorted(missing)}")
     pdf_index = build_pdf_index(args.papers_dir)
     gold["matched_pdf"] = gold.apply(lambda r: match_pdf(r, pdf_index), axis=1)
 
-    # Keep only rows that have a PDF on disk; first 5 = calibration, remainder = held-out test
+    # Split matched papers in workbook order.
     matched_gold = gold[gold["matched_pdf"].notna()].reset_index(drop=True)
-    matched_gold["split"] = ["calibration" if i < 5 else "test" for i in range(len(matched_gold))]
+    matched_gold["split"] = ["calibration" if i < args.calibration_count else "test" for i in range(len(matched_gold))]
 
     unmatched = gold[gold["matched_pdf"].isna()]
+    if args.paper_numbers and (not unmatched.empty or matched_gold["matched_pdf"].duplicated().any()):
+        parser.error("Each requested paper must match a different PDF")
     if not unmatched.empty:
         print(f"Skipping {len(unmatched)} workbook rows with no PDF on disk: {list(unmatched['paper_num'])}")
+
+    examples = None
+    if args.few_shot:
+        calibration = matched_gold[matched_gold["split"] == "calibration"]
+        if calibration.empty:
+            parser.error("Few-shot evaluation requires at least one calibration paper")
+        examples = build_few_shot_examples(calibration)
+        print(f"Few-shot examples: papers {calibration['paper_num'].tolist()}, {sum(map(len, examples.values()))} reference scores across {len(examples)} criteria")
 
     if args.split != "all":
         matched_gold = matched_gold[matched_gold["split"] == args.split].copy()
@@ -237,13 +280,25 @@ def main():
     if args.dry_run_match:
         return
 
+    if matched_gold.empty:
+        parser.error("No matched papers in the selected split")
+    output_dir = args.output_dir or args.papers_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if args.output_dir and args.resume_since is None and any(output_dir.iterdir()):
+        parser.error("--output-dir must be empty for a fresh run")
+
+    from main import GroqRateLimitError, LLM_PROVIDER, MODEL_EXTRACT, RunReq, app, extract_run
+
+    if args.resume_since is not None and LLM_PROVIDER != "groq":
+        parser.error("--resume-since currently supports Groq runs with a pinned model")
+
     with TestClient(app) as client:
-        r_resp = client.post("/api/rubrics", json={"yaml_text": RUBRIC_PATH.read_text()})
+        r_resp = client.post("/api/rubrics", json={"yaml_text": args.rubric.read_text()})
         r_resp.raise_for_status()
         rubric_id = r_resp.json()["rubric_id"]
         print(f"\nRegistered rubric_id={rubric_id}")
 
-        ckpt_path = args.papers_dir / f".checkpoint_{args.split}.json"
+        ckpt_path = output_dir / f".checkpoint_{args.split}.json"
         ckpt = json.loads(ckpt_path.read_text()) if ckpt_path.exists() else {}
         done_by_num = {int(item["record"]["paper_num"]): item for item in ckpt.get("completed", [])}
 
@@ -263,9 +318,23 @@ def main():
             ing.raise_for_status()
             paper_id = ing.json()["paper_id"]
 
-            ext = client.post("/api/extract", json={"rubric_id": rubric_id, "paper_ids": [paper_id]})
-            ext.raise_for_status()
-            cells = ext.json()["extracted"][paper_id]
+            try:
+                if args.resume_since is not None or examples is not None:
+                    result = client.portal.call(partial(
+                        extract_run,
+                        RunReq(rubric_id=rubric_id, paper_ids=[paper_id], force=examples is not None),
+                        MODEL_EXTRACT, resume_since=args.resume_since, examples=examples,
+                    ))
+                    cells = result["extracted"][paper_id]
+                else:
+                    ext = client.post("/api/extract", json={"rubric_id": rubric_id, "paper_ids": [paper_id], "force": bool(args.output_dir)})
+                    ext.raise_for_status()
+                    cells = ext.json()["extracted"][paper_id]
+            except GroqRateLimitError as exc:
+                print(f"Paper {pnum}: {exc}", file=sys.stderr)
+                if args.resume_since is not None:
+                    print("Resume with the same command after quota becomes available.", file=sys.stderr)
+                raise SystemExit(1) from None
 
             pred_record = {"paper_num": pnum, "pdf_filename": pdf_path.name, "paper_id": paper_id}
             paper_mismatches = []
@@ -283,8 +352,8 @@ def main():
                             "gold": g_val,
                             "gold_comment": row.get(f"{cid}__comment", ""),
                             "pred": val,
-                            "status": cell.get("critic_status"),
-                            "quote": (cell.get("verbatim_quote") or "")[:120],
+                            "status": cell.get("status"),
+                            "quote": (cell.get("quote") or cell.get("verbatim_quote") or "")[:120],
                         })
 
             pred_rows.append(pred_record)
@@ -294,10 +363,10 @@ def main():
             print(f"Completed Paper {pnum:2d} ({pdf_path.name}) -> paper_id={paper_id}")
 
     pred_df = pd.DataFrame(pred_rows)
-    pred_df.to_csv(args.papers_dir / f"predictions_{args.split}.csv", index=False)
+    pred_df.to_csv(output_dir / f"predictions_{args.split}.csv", index=False)
 
     metrics_df = score_predictions(matched_gold, pred_df)
-    metrics_df.to_csv(args.papers_dir / f"metrics_{args.split}.csv", index=False)
+    metrics_df.to_csv(output_dir / f"metrics_{args.split}.csv", index=False)
 
     print("\n=== PER-CRITERION METRICS ===")
     print(metrics_df.to_string(index=False))
@@ -305,7 +374,7 @@ def main():
     print(f"Overall Mean Macro F1:       {metrics_df['macro_f1'].mean():.3f}")
 
     if mismatches:
-        mismatch_path = args.papers_dir / f"mismatches_{args.split}.json"
+        mismatch_path = output_dir / f"mismatches_{args.split}.json"
         mismatch_path.write_text(json.dumps(mismatches, indent=2))
         print(f"\nSaved {len(mismatches)} cell discrepancies to {mismatch_path}")
 

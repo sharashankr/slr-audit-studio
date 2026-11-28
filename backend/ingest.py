@@ -185,7 +185,7 @@ WITH kw AS (
   FROM chunks WHERE paper_id=%(pid)s AND tsv @@ websearch_to_tsquery('english', %(q)s) LIMIT 20),
 sem AS (
   SELECT chunk_id, row_number() OVER (ORDER BY embedding <=> %(qv)s::vector) r
-  FROM chunks WHERE paper_id=%(pid)s AND embedding IS NOT NULL LIMIT 20)
+  FROM chunks WHERE paper_id=%(pid)s AND %(qv)s::vector IS NOT NULL AND embedding IS NOT NULL LIMIT 20)
 SELECT c.chunk_id, c.section, c.kind, c.text, c.page_start, c.bboxes,
        coalesce(1.0/(60+kw.r),0) + coalesce(1.0/(60+sem.r),0) AS score
 FROM chunks c LEFT JOIN kw USING (chunk_id) LEFT JOIN sem USING (chunk_id)
@@ -194,7 +194,7 @@ ORDER BY score DESC LIMIT %(k)s
 """
 
 
-def retrieve(conn, paper_id: str, query: str, query_vec: list[float], k: int = 6) -> list[dict]:
+def retrieve(conn, paper_id: str, query: str, query_vec: list[float] | None, k: int = 6) -> list[dict]:
     cur = conn.execute(HYBRID_SQL, {"q": query, "pid": paper_id, "qv": query_vec, "k": k})
     cols = [d.name for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]

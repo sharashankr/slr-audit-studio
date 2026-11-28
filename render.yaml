@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: slr-audit-studio-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: NODE_VERSION
+        value: 22.22.0
