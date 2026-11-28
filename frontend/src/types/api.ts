@@ -21,6 +21,8 @@ export interface PaperSummary {
   paper_id: string;
   title: string;
   pdf_url: string;
+  doi?: string | null;
+  year?: number | null;
 }
 
 export interface MatrixCell {
@@ -37,6 +39,7 @@ export interface MatrixCell {
 }
 
 export interface MatrixResponse {
+  rubric_name: string;
   papers: PaperSummary[];
   criteria: string[];
   cells: MatrixCell[];
