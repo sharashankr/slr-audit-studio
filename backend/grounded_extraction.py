@@ -113,6 +113,8 @@ VERIFY_SYS = (
 )
 
 BATCH_SIZE = 7
+EXCERPT_BATCH_SIZE = 4
+EXCERPT_CHARS = 1000
 MAX_FULL_CONTEXT_CHARS = 65_000  # ~16k tokens; larger papers fall back to retrieved chunks
 
 
@@ -212,9 +214,10 @@ async def extract_cell(
     initial_chunks: list[dict] | None = None,
     allow_full_context: bool = True,
     examples: dict | None = None,
+    max_attempts: int = MAX_ATTEMPTS,
 ) -> CellResult:
     if initial_chunks is not None:
-        chunks, used_full = initial_chunks, True
+        chunks, used_full = initial_chunks, allow_full_context
     else:
         query = f"{c.question} {' '.join(c.section_hints)}"
         chunks, used_full = await retrieve_fn(paper_id, query, 6), False
@@ -222,10 +225,10 @@ async def extract_cell(
     last: CellResult | None = None
 
 
-    for attempt in range(1, MAX_ATTEMPTS + 2):                       # last pass = full-context fallback
-        if attempt > MAX_ATTEMPTS and not used_full and allow_full_context:
+    for attempt in range(1, max_attempts + 2):                       # last pass = full-context fallback
+        if attempt > max_attempts and not used_full and allow_full_context:
             chunks, used_full, feedback = await full_text_fn(paper_id), True, feedback + "\nSearch the full paper."
-        elif attempt > MAX_ATTEMPTS:
+        elif attempt > max_attempts:
             break
         payload = {"criterion": c.model_dump(exclude={"stage"}), "retry_feedback": feedback or None}
         user = json.dumps(_with_examples(payload, [c], examples)) + "\n\nCHUNKS:\n" + _fmt(chunks)
@@ -298,7 +301,7 @@ async def extract_cell(
             ex.confidence, "needs_review", feedback, attempt
         )
 
-    return last or CellResult(c.criterion_id, None, None, None, None, None, 0.0, "needs_review", "No grounded extraction after retries", MAX_ATTEMPTS)
+    return last or CellResult(c.criterion_id, None, None, None, None, None, 0.0, "needs_review", "No grounded extraction after retries", max_attempts)
 
 
 async def _extract_batch(
@@ -339,7 +342,7 @@ async def _extract_batch(
             if used_full:
                 candidates[c.criterion_id] = (item, None, True)
             else:
-                retry.append((c, f"You selected '{item.value}' without a quote; verify across the full paper."))
+                retry.append((c, f"You selected '{item.value}' without a quote; check the next relevant excerpts."))
             continue
 
         ref_chunk = ref_map.get(item.chunk_ref or "")
@@ -462,6 +465,7 @@ async def extract_paper(
     allow_full_context: bool = True,
     examples: dict | None = None,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    excerpt_batches: bool = False,
 ) -> list[CellResult]:
     skip = skip_criterion_ids or set()
     todo = [c for c in rubric.criteria if c.kind in ("extraction", "quality") and c.criterion_id not in skip]
@@ -470,7 +474,7 @@ async def extract_paper(
 
     crit_by_id = {c.criterion_id: c for c in todo}
     full_chunks = await full_text_fn(paper_id)
-    full_text, ref_map = _fmt_indexed(full_chunks)
+    full_text, ref_map = _fmt_indexed(full_chunks) if allow_full_context else ("", {})
     use_full_batch = allow_full_context and bool(full_chunks) and len(full_text) <= MAX_FULL_CONTEXT_CHARS
     print(f"[extract] paper={paper_id[:8]} todo={len(todo)} chunks={len(full_chunks)} chars={len(full_text)} full_batch={use_full_batch}", flush=True)
 
@@ -478,6 +482,7 @@ async def extract_paper(
     candidates: dict[str, tuple[BatchExtractionItem, dict | None, bool]] = {}
     retry_entries: list[tuple[Criterion, str]] = []
     is_rct = False
+    followup_chunks: dict[str, list[dict]] = {}
 
     if use_full_batch:
         # 1. Extract non-OBS batch containing STUDY_DESIGN first so RCT papers skip OBS_*
@@ -532,6 +537,52 @@ async def extract_paper(
         if on_progress:
             await on_progress(len(results), len(todo))
         retry_entries.extend(critic_rejected)
+    elif excerpt_batches:
+        design = crit_by_id.get("STUDY_DESIGN")
+        ordered = ([design] if design else []) + [c for c in todo if c is not design]
+        for start in range(0, len(ordered), EXCERPT_BATCH_SIZE):
+            group = ordered[start : start + EXCERPT_BATCH_SIZE]
+            finished = [
+                CellResult(c.criterion_id, "NA", None, None, None, None, 1.0, "verified", "Skipped: STUDY_DESIGN=2 (RCT)", 0)
+                for c in group if is_rct and c.criterion_id.startswith("OBS_")
+            ]
+            skipped_ids = {cell.criterion_id for cell in finished}
+            group = [c for c in group if c.criterion_id not in skipped_ids]
+            if group:
+                selected = {}
+                ranked = {}
+                for c in group:
+                    query = f"{c.question} {' '.join(c.section_hints)}"
+                    ranked[c.criterion_id] = await retrieve_fn(paper_id, query, 6)
+                    for chunk in ranked[c.criterion_id][:2]:
+                        selected[chunk["chunk_id"]] = {**chunk, "text": chunk["text"][:EXCERPT_CHARS]}
+                evidence = list(selected.values())
+                text, refs = _fmt_indexed(evidence)
+                batch_candidates, ungrounded = await _extract_batch(
+                    group, evidence, text, refs, False, llm_extract, examples,
+                )
+                verified, rejected = await _verify_batch(crit_by_id, batch_candidates, "", llm_verify)
+                finished.extend(verified)
+                for c, feedback in ungrounded + rejected:
+                    # Coverage expands locally by moving to unread chunks. If the
+                    # critic rejected a grounded answer, keep its source in view.
+                    prior = ranked[c.criterion_id]
+                    unread = [chunk for chunk in prior if chunk["chunk_id"] not in selected]
+                    candidate = batch_candidates.get(c.criterion_id)
+                    source = candidate[1] if candidate else None
+                    retry_sources = ([source] if source else []) + unread
+                    followup_chunks[c.criterion_id] = [
+                        {**chunk, "text": chunk["text"][:EXCERPT_CHARS]} for chunk in (retry_sources or prior)[:3]
+                    ]
+                    retry_entries.append((c, feedback))
+                is_rct = is_rct or any(
+                    cell.criterion_id == "STUDY_DESIGN" and str(cell.value) == "2" and cell.status == "verified"
+                    for cell in verified
+                )
+            _save_cells(conn, rubric_id, paper_id, finished, model_version)
+            results.extend(finished)
+            if on_progress:
+                await on_progress(len(results), len(todo))
     else:
         retry_entries = [(c, "") for c in todo]
 
@@ -549,8 +600,9 @@ async def extract_paper(
             async with sem:
                 res = await extract_cell(
                     c, paper_id, retrieve_fn, full_text_fn, llm_extract, llm_verify,
-                    initial_feedback=fb, initial_chunks=retry_chunks,
+                    initial_feedback=fb, initial_chunks=followup_chunks.get(c.criterion_id, retry_chunks),
                     allow_full_context=allow_full_context, examples=examples,
+                    max_attempts=1 if excerpt_batches else MAX_ATTEMPTS,
                 )
                 _save_cells(conn, rubric_id, paper_id, [res], model_version)
                 completed += 1

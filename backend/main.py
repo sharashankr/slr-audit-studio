@@ -591,12 +591,12 @@ async def extract_run(
     llm_verify = make_llm_json(VERIFY_MODELS)
 
     browser_direct = _browser_llm.get() is not None
-    bounded_context = browser_provider != "Google Gemini" if browser_direct else LLM_PROVIDER == "groq"
+    bounded_context = browser_direct or LLM_PROVIDER == "groq"
     paper_chunks: dict[str, list[dict]] = {}
 
     # Hybrid keyword + semantic RRF retrieval helper (with cached query embedding)
     async def retrieve_fn(pid: str, query: str, k: int) -> list[dict]:
-        if bounded_context or browser_direct:
+        if bounded_context:
             chunks = await full_text_fn(pid)
             terms = set(re.findall(r"\b\w{4,}\b", query.lower()))
 
@@ -699,6 +699,7 @@ async def extract_run(
                     allow_full_context=not bounded_context,
                     examples=examples,
                     on_progress=on_progress,
+                    excerpt_batches=browser_direct and browser_provider == "Google Gemini",
                 )
             summary[pid] = existing_rows + [c.__dict__ for c in new_cells]
     return {"extracted": summary}
