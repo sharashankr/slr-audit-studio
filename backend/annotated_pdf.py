@@ -10,7 +10,7 @@ from typing import Any
 
 import pypdfium2 as pdfium
 from pypdfium2 import raw
-from docling.utils.locks import pypdfium2_lock
+from pdfium_support import pypdfium2_lock
 
 _COLORS = {
     "approved": (46, 180, 100),

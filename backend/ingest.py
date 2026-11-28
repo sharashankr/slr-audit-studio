@@ -5,18 +5,21 @@ Deterministic: no LLM calls here. Embeddings are injected (embed_fn).
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
+import os
 import re
+from contextlib import closing
+from importlib.metadata import version
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
 import psycopg
-from docling.document_converter import DocumentConverter
 
 MAX_CHARS = 2400          # ~600 tokens; split long sections on paragraph boundaries
-PARSER_NAME = "docling"
+
 
 _SKIP_EMBED_RE = re.compile(r"(^|\s|>)(references|bibliography|works cited|acknowledg(e)?ments)(\s|$)", re.I)
 
@@ -50,6 +53,8 @@ def _bboxes(item, page_sizes: dict[int, tuple[float, float]]) -> list[dict]:
 
 
 def parse_pdf(path: Path):
+    from docling.document_converter import DocumentConverter
+
     converter = DocumentConverter()          # enable table-structure + OCR via pipeline options as needed
     result = converter.convert(str(path))
     doc = result.document
@@ -117,6 +122,45 @@ def build_chunks(doc, page_sizes) -> list[Chunk]:
     return chunks
 
 
+def parse_text_pdf(path: Path) -> tuple[list[Chunk], dict, str | None]:
+    """Extract text from text-native PDFs, with page coordinates for each text block."""
+    import pypdfium2 as pdfium
+    from pypdfium2 import raw
+    from pdfium_support import pypdfium2_lock
+
+    chunks: list[Chunk] = []
+    sizes = {}
+    with pypdfium2_lock, pdfium.PdfDocument(path) as document:
+        title = document.get_metadata_value("Title").strip() or None
+        if len(document) > 200:
+            raise ValueError("The beta supports PDFs of up to 200 pages.")
+        for index in range(len(document)):
+            page_number = index + 1
+            with closing(document[index]) as page, closing(page.get_textpage()) as textpage:
+                w, h = page.get_size()
+                sizes[page_number] = (w, h)
+                char_count = textpage.count_chars()
+                for start in range(0, char_count, MAX_CHARS):
+                    length = min(MAX_CHARS, char_count - start)
+                    text = textpage.get_text_range(start, length).replace("\x00", "").strip()
+                    if not text:
+                        continue
+                    boxes = []
+                    for box_index in range(textpage.count_rects(start, length)):
+                        left, bottom, right, top = textpage.get_rect(box_index)
+                        points = []
+                        for x, y in ((left, bottom), (right, top), (left, top), (right, bottom)):
+                            px, py = ctypes.c_int(), ctypes.c_int()
+                            raw.FPDF_PageToDevice(page, 0, 0, 100_000, 100_000, 0, x, y, px, py)
+                            points.append((px.value * w / 100_000, py.value * h / 100_000))
+                        xs, ys = zip(*points)
+                        boxes.append(dict(page=page_number, l=min(xs), t=min(ys), r=max(xs), b=max(ys), w=w, h=h))
+                    chunks.append(Chunk(len(chunks), f"Page {page_number}", "text", text, {page_number}, boxes))
+    if not chunks:
+        raise ValueError("This PDF has no extractable text. Upload a searchable PDF or an OCR-processed copy.")
+    return chunks, sizes, title
+
+
 def extract_metadata(doc, chunks: Sequence[Chunk]) -> dict:
     title = next((c.text for c in chunks if c.section == "Front matter"), None)
     abstract = None
@@ -137,25 +181,36 @@ def ingest_pdf(
     pdf_uri: str,
     embed_fn: Callable[[list[str]], list[list[float]]] | None = None,
     workspace_id: str = "default",
+    persist_pdf: bool = False,
 ) -> str:
     digest = sha256_file(path)
     row = conn.execute("SELECT paper_id FROM papers WHERE sha256=%s AND workspace_id=%s", (digest, workspace_id)).fetchone()
     if row:
+        if persist_pdf:
+            conn.execute("UPDATE papers SET pdf_bytes=%s WHERE paper_id=%s AND pdf_bytes IS NULL", (path.read_bytes(), row[0]))
         return str(row[0])                       # idempotent: same bytes -> same record
 
-    doc, page_sizes = parse_pdf(path)
-    chunks = build_chunks(doc, page_sizes)
-    meta = extract_metadata(doc, chunks)
-    import docling
+    parser = os.getenv("SLR_PDF_PARSER", "docling")
+    if parser == "pdfium":
+        chunks, page_sizes, title = parse_text_pdf(path)
+        meta = extract_metadata(None, chunks)
+        meta["title"] = title or pdf_uri.removeprefix("/pdfs/")
+    else:
+        doc, page_sizes = parse_pdf(path)
+        chunks = build_chunks(doc, page_sizes)
+        meta = extract_metadata(doc, chunks)
+    parser_version = version("pypdfium2" if parser == "pdfium" else "docling")
     with conn.transaction():
         paper_id = conn.execute(
             """INSERT INTO papers (sha256, doi, title, abstract, pdf_uri, parser_name, parser_version, page_sizes, workspace_id)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING paper_id""",
-            (digest, meta["doi"], meta["title"], meta["abstract"], pdf_uri, PARSER_NAME,
-             getattr(docling, "__version__", "unknown"),
+            (digest, meta["doi"], meta["title"], meta["abstract"], pdf_uri, parser,
+             parser_version,
              json.dumps({str(k): list(v) for k, v in page_sizes.items()}),
              workspace_id),
         ).fetchone()[0]
+        if persist_pdf:
+            conn.execute("UPDATE papers SET pdf_bytes=%s WHERE paper_id=%s", (path.read_bytes(), paper_id))
         to_embed_idx = [
             i for i, c in enumerate(chunks)
             if c.kind != "figure" and not _SKIP_EMBED_RE.search(c.section)

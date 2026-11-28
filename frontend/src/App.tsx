@@ -26,7 +26,7 @@ import {
   Zap,
 } from "lucide-react";
 import { buildEvidenceCsv } from "./api/evidenceCsv";
-import { api, browserOperation } from "./api/client";
+import { api, browserOperation, getBetaCode, setBetaCode } from "./api/client";
 import type {
   MatrixCell,
   MatrixResponse,
@@ -195,6 +195,8 @@ export function App() {
   const [llmModel, setLlmModel] = useState(PROVIDER_MODELS["Google Gemini"][0]);
   const [apiKeys, setApiKeys] = useState<Partial<Record<LLMProvider, string>>>({});
   const [showApiKey, setShowApiKey] = useState(false);
+  const [betaAccessRequired, setBetaAccessRequired] = useState(false);
+  const [betaCode, setBetaCodeInput] = useState(getBetaCode);
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectedModel, setConnectedModel] = useState<BrowserModel>();
   const [connectionError, setConnectionError] = useState<string>();
@@ -231,13 +233,20 @@ export function App() {
     }
   }, [rubricId]);
 
+  useEffect(() => {
+    void api.health().then((result) => setBetaAccessRequired(Boolean(result.beta_access_required))).catch(() => {});
+  }, []);
+
   const handleTestConnection = async () => {
     if (!browserModel) return;
     setTestingConnection(true);
     setConnectionError(undefined);
     setConnectedModel(undefined);
     try {
+      setBetaCode(betaCode.trim());
+      await api.checkBetaAccess();
       await testBrowserModel(browserModel);
+      if (rubricId) await loadMatrix(rubricId);
       setConnectedModel(browserModel);
     } catch (error) {
       setConnectionError(error instanceof Error ? error.message : "Connection test failed.");
@@ -598,8 +607,25 @@ export function App() {
                   </div>
                 </div>
 
+                {betaAccessRequired && (
+                  <label className="mt-4 block text-xs font-medium text-slate-300">
+                    Studio beta access code
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      value={betaCode}
+                      disabled={testingConnection || runningPipeline || compilingRubric || synthLoading}
+                      onChange={(event) => {
+                        setBetaCodeInput(event.target.value);
+                        setConnectedModel(undefined);
+                        setConnectionError(undefined);
+                      }}
+                      className="mt-2 block w-full max-w-sm rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white"
+                    />
+                  </label>
+                )}
                 <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <button type="button" disabled={!browserModel || testingConnection || runningPipeline || compilingRubric || synthLoading}
+                  <button type="button" disabled={!browserModel || (betaAccessRequired && !betaCode.trim()) || testingConnection || runningPipeline || compilingRubric || synthLoading}
                     onClick={() => void handleTestConnection()}
                     className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold hover:bg-blue-500 disabled:opacity-40">
                     {testingConnection ? "Testing…" : "Test connection"}

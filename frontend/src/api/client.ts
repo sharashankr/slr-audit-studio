@@ -29,18 +29,44 @@ function getWorkspaceId(): string {
   return id;
 }
 
+const BETA_KEY_STORAGE = "slr_beta_access";
+
+export function getBetaCode(): string {
+  return sessionStorage.getItem(BETA_KEY_STORAGE) ?? "";
+}
+
+export function setBetaCode(value: string) {
+  if (value) sessionStorage.setItem(BETA_KEY_STORAGE, value);
+  else sessionStorage.removeItem(BETA_KEY_STORAGE);
+}
+
+function workspaceHeaders(): Record<string, string> {
+  const code = getBetaCode();
+  return { "X-Workspace-ID": getWorkspaceId(), ...(code ? { "X-SLR-Beta-Key": code } : {}) };
+}
+
+export function pdfRequest(url: string) {
+  const resolved = resolvePdfUrl(url);
+  if (!resolved) return "";
+  return new URL(resolved).origin === new URL(API_BASE).origin
+    ? { url: resolved, httpHeaders: workspaceHeaders() }
+    : resolved;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
-      "X-Workspace-ID": getWorkspaceId(),
+      ...workspaceHeaders(),
       ...init?.headers,
     },
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+    let message: unknown;
+    try { message = JSON.parse(detail).detail; } catch { message = detail; }
+    throw new Error(typeof message === "string" ? message : `Studio returned HTTP ${res.status}.`);
   }
   return res.json() as Promise<T>;
 }
@@ -49,14 +75,14 @@ export function browserOperation<T>(
   action: string, params: object, model: BrowserModel,
   onProgress?: (completed: number, total: number) => void,
 ) {
-  return runBrowserModel<T>(API_BASE, getWorkspaceId(), action, params, model, onProgress);
+  return runBrowserModel<T>(API_BASE, getWorkspaceId(), action, params, model, onProgress, getBetaCode());
 }
 
 async function download(path: string): Promise<Blob> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
-      headers: { "X-Workspace-ID": getWorkspaceId() },
+      headers: workspaceHeaders(),
     });
   } catch {
     throw new Error("Studio could not reach the export endpoint. Check that the backend is running, then try the download again.");
@@ -69,7 +95,9 @@ async function download(path: string): Promise<Blob> {
 }
 
 export const api = {
-  health: () => request<{ status: string }>("/api/health"),
+  health: () => request<{ status: string; beta_access_required?: boolean }>("/api/health"),
+
+  checkBetaAccess: () => request<{ status: string }>("/api/beta-access"),
 
   getMatrix: (rubricId: string) =>
     request<MatrixResponse>(`/api/matrix/${encodeURIComponent(rubricId)}`),

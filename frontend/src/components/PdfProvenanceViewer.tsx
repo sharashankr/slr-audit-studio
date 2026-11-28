@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, FileWarning } from "lucide-react";
+import { pdfRequest } from "../api/client";
 import type { BBox } from "../types/api";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
@@ -17,6 +18,7 @@ interface Props {
 }
 
 export function PdfProvenanceViewer({ pdfUrl, targetPage, bboxes }: Props) {
+  const file = useMemo(() => pdfRequest(pdfUrl), [pdfUrl]);
   const [numPages, setNumPages] = useState<number>(0);
   const [pageNumber, setPageNumber] = useState<number>(targetPage || 1);
   const [scale, setScale] = useState<number>(1.05);
@@ -110,7 +112,7 @@ export function PdfProvenanceViewer({ pdfUrl, targetPage, bboxes }: Props) {
       <div className="flex-1 overflow-auto p-4">
         <div className="mx-auto w-fit shadow-2xl">
           <Document
-            file={pdfUrl}
+            file={file}
             onLoadSuccess={({ numPages: total }) => setNumPages(total)}
             loading={
               <div className="p-12 text-sm text-slate-400">Loading PDF document...</div>

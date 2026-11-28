@@ -14,6 +14,7 @@ from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -29,8 +30,10 @@ import psycopg
 import yaml
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
+from pypdfium2 import PdfiumError
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, ValidationError
@@ -98,7 +101,36 @@ gemini_key = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=gemini_key) if LLM_PROVIDER == "gemini" and gemini_key else None
 app = FastAPI(title="SLR-Audit Studio API (Free Tier)")
 
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
+CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",")]
+BETA_KEY = os.getenv("SLR_BETA_KEY", "").strip()
+DURABLE_PDFS = os.getenv("SLR_PDF_STORAGE") == "postgres"
+if os.getenv("RENDER") == "true" and not DURABLE_PDFS:
+    raise RuntimeError("Render beta requires SLR_PDF_STORAGE=postgres.")
+if (DURABLE_PDFS or os.getenv("RENDER") == "true") and (
+    len(BETA_KEY) < 24 or "*" in CORS_ORIGINS or not all(CORS_ORIGINS)
+):
+    raise RuntimeError("Hosted beta requires SLR_BETA_KEY (24+ characters) and explicit CORS_ORIGINS.")
+
+
+def beta_authorized(key: str) -> bool:
+    return not BETA_KEY or hmac.compare_digest(key.encode(), BETA_KEY.encode())
+
+
+@app.middleware("http")
+async def require_beta_access(request: Request, call_next):
+    if not BETA_KEY or request.method == "OPTIONS" or request.url.path == "/api/health":
+        return await call_next(request)
+    if not beta_authorized(request.headers.get("X-SLR-Beta-Key", "")):
+        return JSONResponse({"detail": "Enter the Studio beta access code."}, status_code=401)
+    # Hosted extraction and rubric lint go through the BYOK WebSocket.
+    if request.method == "POST" and (
+        request.url.path in {"/api/rubrics", "/api/rubrics/dry-run", "/api/screen", "/api/extract"}
+        or request.url.path.startswith("/api/synthesize/")
+    ):
+        return JSONResponse({"detail": "This beta uses browser-direct model connections."}, status_code=403)
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -106,7 +138,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 # Serve uploaded PDFs at /pdfs/<filename> so react-pdf can render bounding-box overlays
-app.mount("/pdfs", StaticFiles(directory=str(PDF_DIR)), name="pdfs")
+if not DURABLE_PDFS:
+    app.mount("/pdfs", StaticFiles(directory=str(PDF_DIR)), name="pdfs")
 
 
 def get_conn() -> psycopg.Connection:
@@ -119,6 +152,16 @@ def get_conn() -> psycopg.Connection:
         keepalives_interval=10,
         keepalives_count=5,
     )
+
+
+@app.on_event("startup")
+def initialize_beta_schema():
+    if not DURABLE_PDFS:
+        return
+    source_dir = Path(__file__).resolve().parent
+    with get_conn() as conn, conn.transaction():
+        for script in ("schema.sql", "migrate_workspace.sql", "migrate_beta_storage.sql"):
+            conn.execute((source_dir / script).read_text())
 
 
 def _workspace(request: Request) -> str:
@@ -413,6 +456,7 @@ def health():
     """Verify server liveness and active free-tier model configuration."""
     return {
         "status": "ok",
+        "beta_access_required": bool(BETA_KEY),
         "models": {
             "extract": MODEL_EXTRACT,
             "verify": MODEL_VERIFY,
@@ -422,11 +466,41 @@ def health():
     }
 
 
+@app.get("/api/beta-access")
+def check_beta_access():
+    return {"status": "ok"}
+
+
 @app.post("/api/ingest")
 async def api_ingest(request: Request, file: UploadFile = File(...)):
     """Phase 1: Parse a PDF with Docling, extract bboxes, and index chunks in pgvector."""
     ws = _workspace(request)
-    dest = PDF_DIR / Path(file.filename).name
+    filename = Path(file.filename or "").name
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(422, "Choose a PDF file.")
+    if DURABLE_PDFS:
+        if file.size is not None and file.size > 10 * 1024 * 1024:
+            raise HTTPException(413, "PDFs in this beta must be 10 MB or smaller.")
+
+        def persist_upload():
+            with tempfile.NamedTemporaryFile(suffix=".pdf") as staged:
+                data = file.file.read(10 * 1024 * 1024 + 1)
+                if len(data) > 10 * 1024 * 1024:
+                    raise HTTPException(413, "PDFs in this beta must be 10 MB or smaller.")
+                staged.write(data)
+                staged.flush()
+                with get_conn() as conn:
+                    return ingest_pdf(conn, Path(staged.name), f"/pdfs/{filename}", workspace_id=ws, persist_pdf=True)
+
+        try:
+            paper_id = await run_in_threadpool(persist_upload)
+        except (ValueError, PdfiumError) as exc:
+            raise HTTPException(422, str(exc) if isinstance(exc, ValueError) else "Studio could not read this PDF.") from None
+        except psycopg.errors.UniqueViolation:
+            raise HTTPException(409, "This PDF was just uploaded. Try loading the rubric again.") from None
+        return {"paper_id": paper_id, "pdf_url": f"/api/papers/{paper_id}/pdf"}
+
+    dest = PDF_DIR / filename
     # Stage the upload before replacing the destination in case the benchmark
     # opened the same file as its source.
     with tempfile.NamedTemporaryFile(dir=PDF_DIR, delete=False) as staged:
@@ -498,7 +572,7 @@ async def api_screen(req: RunReq, request: Request):
         survivors = await run_pipeline(
             conn, req.rubric_id, rubric, req.paper_ids, make_llm_json(EXTRACT_MODELS), MODEL_EXTRACT
         )
-        prisma = prisma_counts(conn, req.rubric_id, identified=len(req.paper_ids), duplicates_removed=0)
+        prisma = prisma_counts(conn, req.rubric_id, identified=len(req.paper_ids), duplicates_removed=0, workspace_id=ws)
     return {"survivors": survivors, "prisma": prisma}
 
 
@@ -659,7 +733,8 @@ def api_matrix(rubric_id: str, request: Request):
     return {
         "rubric_name": rubric_name,
         "papers": [
-            {"paper_id": p[0], "title": p[1] or p[0], "pdf_url": p[2], "doi": p[3], "year": p[4]}
+            {"paper_id": p[0], "title": p[1] or p[0],
+             "pdf_url": f"/api/papers/{p[0]}/pdf" if DURABLE_PDFS else p[2], "doi": p[3], "year": p[4]}
             for p in papers
         ],
         "criteria": criteria,
@@ -668,15 +743,19 @@ def api_matrix(rubric_id: str, request: Request):
 
 
 @app.post("/api/cells/approve")
-def api_approve(req: ApproveReq):
+def api_approve(req: ApproveReq, request: Request):
     """Phase 4b: Append 'approved' cell versions (preserving immutable history) and log audit events."""
     out = []
     with get_conn() as conn, conn.transaction():
         for cid in req.cell_ids:
             old = conn.execute(
-                "SELECT rubric_id, paper_id, criterion_id, critic_status FROM extraction_cells WHERE cell_id=%s",
-                (cid,),
+                """SELECT c.rubric_id, c.paper_id, c.criterion_id, c.critic_status
+                   FROM extraction_cells c JOIN papers p USING (paper_id)
+                   WHERE c.cell_id=%s AND c.rubric_id=%s AND p.workspace_id=%s""",
+                (cid, req.rubric_id, _workspace(request)),
             ).fetchone()
+            if old is None:
+                raise HTTPException(404, "Evidence cell unavailable in this workspace")
             cur = conn.execute(
                 """INSERT INTO extraction_cells (rubric_id, paper_id, criterion_id, value, verbatim_quote, chunk_id,
                      page_number, bbox, confidence, critic_status, critic_notes, attempts, model_version)
@@ -698,15 +777,19 @@ def api_approve(req: ApproveReq):
 
 
 @app.post("/api/cells/override")
-def api_override(req: OverrideReq):
+def api_override(req: OverrideReq, request: Request):
     """Phase 4c: Append a human-overridden cell value with mandatory rationale and audit entry."""
     if not req.reason.strip():
         raise HTTPException(422, "reason required")
     with get_conn() as conn, conn.transaction():
         old = conn.execute(
-            "SELECT rubric_id, paper_id, criterion_id, value, critic_status FROM extraction_cells WHERE cell_id=%s",
-            (req.cell_id,),
+            """SELECT c.rubric_id, c.paper_id, c.criterion_id, c.value, c.critic_status
+               FROM extraction_cells c JOIN papers p USING (paper_id)
+               WHERE c.cell_id=%s AND p.workspace_id=%s""",
+            (req.cell_id, _workspace(request)),
         ).fetchone()
+        if old is None:
+            raise HTTPException(404, "Evidence cell unavailable in this workspace")
         cur = conn.execute(
             """INSERT INTO extraction_cells (rubric_id, paper_id, criterion_id, value, verbatim_quote, chunk_id,
                  page_number, bbox, confidence, critic_status, critic_notes, attempts, model_version)
@@ -751,6 +834,7 @@ class BrowserOperation(BaseModel):
     workspace: UUID
     model: str
     provider: Literal["Google Gemini", "Groq", "Mistral"] | None = None
+    beta_key: str = ""
     params: dict[str, Any]
 
 
@@ -795,6 +879,8 @@ async def browser_model(socket: WebSocket):
         operation = BrowserOperation.model_validate(
             await asyncio.wait_for(socket.receive_json(), timeout=15)
         )
+        if not beta_authorized(operation.beta_key):
+            raise HTTPException(401, "Enter the Studio beta access code.")
         request = Request({
             **socket.scope, "type": "http",
             "headers": [(b"x-workspace-id", str(operation.workspace).encode())],
@@ -806,10 +892,16 @@ async def browser_model(socket: WebSocket):
             run = RunReq.model_validate(params)
             paper_ids = {UUID(paper_id) for paper_id in run.paper_ids}
             with get_conn() as conn:
+                accessible_rubric = conn.execute(
+                    "SELECT 1 FROM rubrics WHERE rubric_id=%s AND workspace_id IN (%s, 'default')",
+                    (run.rubric_id, str(operation.workspace)),
+                ).fetchone()
                 owned = conn.execute(
                     "SELECT count(*) FROM papers WHERE workspace_id=%s AND paper_id=ANY(%s)",
                     (str(operation.workspace), list(paper_ids)),
                 ).fetchone()[0]
+            if accessible_rubric is None:
+                raise HTTPException(404, "Rubric unavailable in this workspace.")
             if owned != len(paper_ids):
                 raise HTTPException(404, "One or more papers are unavailable in this workspace.")
             if operation.action == "screen":
@@ -852,6 +944,20 @@ def api_export_xlsx(rubric_id: str, request: Request):
     return FileResponse(tmp.name, filename=f"slr_export_{rubric_id[:8]}.xlsx")
 
 
+@app.get("/api/papers/{paper_id}/pdf")
+def api_source_pdf(paper_id: UUID, request: Request):
+    if not DURABLE_PDFS:
+        raise HTTPException(404, "Original PDF unavailable")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT pdf_bytes FROM papers WHERE paper_id=%s AND workspace_id=%s AND pdf_bytes IS NOT NULL",
+            (paper_id, _workspace(request)),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Original PDF unavailable. Re-upload it to this workspace.")
+    return Response(row[0], media_type="application/pdf", headers={"Cache-Control": "private, no-store"})
+
+
 @app.get("/api/export/{rubric_id}/papers/{paper_id}/annotated.pdf")
 def api_export_annotated_pdf(rubric_id: UUID, paper_id: UUID, request: Request):
     ws = _workspace(request)
@@ -865,6 +971,7 @@ def api_export_annotated_pdf(rubric_id: UUID, paper_id: UUID, request: Request):
         if source is None:
             raise HTTPException(404, "Paper or rubric unavailable in this workspace")
         uri, digest = source
+        stored = conn.execute("SELECT pdf_bytes FROM papers WHERE paper_id=%s", (paper_id,)).fetchone() if DURABLE_PDFS else None
         cur = conn.execute(
             """SELECT criterion_id, value, verbatim_quote, bbox, critic_status, critic_notes
                FROM current_cells WHERE rubric_id=%s AND paper_id=%s
@@ -875,15 +982,20 @@ def api_export_annotated_pdf(rubric_id: UUID, paper_id: UUID, request: Request):
         columns = [column.name for column in cur.description]
         evidence = [dict(zip(columns, row)) for row in cur.fetchall()]
 
-    filename = uri.removeprefix("/pdfs/")
     if not evidence:
         raise HTTPException(422, "This paper has no extracted quotes with PDF coordinates to annotate")
-    if not uri.startswith("/pdfs/") or filename in {"", ".", ".."} or Path(filename).name != filename:
-        raise HTTPException(404, "Original PDF unavailable")
-    path = PDF_DIR / filename
-    if not path.is_file() or path.is_symlink():
-        raise HTTPException(404, "Original PDF unavailable")
-    pdf = path.read_bytes()
+    if DURABLE_PDFS:
+        if not stored or stored[0] is None:
+            raise HTTPException(404, "Original PDF unavailable. Re-upload it to this workspace.")
+        pdf = stored[0]
+    else:
+        filename = uri.removeprefix("/pdfs/")
+        if not uri.startswith("/pdfs/") or filename in {"", ".", ".."} or Path(filename).name != filename:
+            raise HTTPException(404, "Original PDF unavailable")
+        path = PDF_DIR / filename
+        if not path.is_file() or path.is_symlink():
+            raise HTTPException(404, "Original PDF unavailable")
+        pdf = path.read_bytes()
     if hashlib.sha256(pdf).hexdigest() != digest:
         raise HTTPException(409, "The stored PDF has changed since extraction. Restore the original PDF before exporting.")
     annotated, count = render_annotated_pdf(pdf, evidence)

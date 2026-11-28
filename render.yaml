@@ -8,3 +8,21 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22.22.0
+  - type: web
+    name: slr-audit-studio-api
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SLR_BETA_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://slr-audit-studio.onrender.com
+      - key: SLR_PDF_STORAGE
+        value: postgres
+      - key: SLR_PDF_PARSER
+        value: pdfium

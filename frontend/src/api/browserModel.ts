@@ -111,6 +111,7 @@ export function runBrowserModel<T>(
   params: object,
   config: BrowserModel,
   onProgress?: (completed: number, total: number) => void,
+  betaCode = "",
 ): Promise<T> {
   const url = new URL(`${apiBase}/api/browser-model`);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -118,7 +119,7 @@ export function runBrowserModel<T>(
     const socket = new WebSocket(url);
     const controller = new AbortController();
     let failure: Error | undefined;
-    socket.onopen = () => socket.send(JSON.stringify({ action, params, workspace, model: config.model, provider: config.provider }));
+    socket.onopen = () => socket.send(JSON.stringify({ action, params, workspace, model: config.model, provider: config.provider, beta_key: betaCode }));
     socket.onmessage = async ({ data }) => {
       const event = JSON.parse(data);
       if (event.type === "result") {
